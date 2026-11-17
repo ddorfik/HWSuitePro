@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="theme-color" content="#0f4c5c" />
+  <title>Termin bestätigen</title>
+  <style>
+    :root {
+      --bg: #eef2f3;
+      --surface: #ffffff;
+      --ink: #0f1c21;
+      --muted: #64748b;
+      --line: #e2e8ea;
+      --brand: #0f4c5c;
+      --brand-2: #12657a;
+      --ok: #15803d;
+      --ok-soft: #dcfce7;
+      --warn: #b45309;
+      --warn-soft: #fef3c7;
+      --danger: #b91c1c;
+      --danger-soft: #fee2e2;
+      --radius: 16px;
+      --font: "Segoe UI", system-ui, -apple-system, "Inter", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; padding: 22px 16px 40px;
+      font-family: var(--font); color: var(--ink); background: var(--bg);
+      display: flex; flex-direction: column; align-items: center; gap: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; color: var(--brand); font-weight: 700; letter-spacing: .02em; }
+    .brand-mark {
+      width: 34px; height: 34px; border-radius: 10px; background: var(--brand); color: #fff;
+      display: grid; place-items: center; font-size: 17px;
+    }
+    .card {
+      width: 100%; max-width: 520px; background: var(--surface); border: 1px solid var(--line);
+      border-radius: var(--radius); box-shadow: 0 1px 2px rgba(15,28,33,.04), 0 10px 30px rgba(15,28,33,.06);
+      overflow: hidden;
+    }
+    .card-head { padding: 20px 22px 16px; border-bottom: 1px solid var(--line); background: #fbfcfc; }
+    .card-head .kicker { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    .card-head h1 { margin: 6px 0 0; font-size: 21px; line-height: 1.25; }
+    .card-body { padding: 20px 22px; }
+    .when {
+      display: flex; gap: 14px; align-items: center; padding: 16px;
+      background: var(--brand); color: #fff; border-radius: 12px; margin-bottom: 18px;
+    }
+    .when .date { font-size: 26px; font-weight: 700; line-height: 1; }
+    .when .time { font-size: 15px; opacity: .9; margin-top: 4px; }
+    .when .dow { margin-left: auto; font-size: 13px; text-align: right; opacity: .85; }
+    dl { margin: 0; display: grid; grid-template-columns: 118px 1fr; gap: 10px 12px; font-size: 14px; }
+    dt { color: var(--muted); }
+    dd { margin: 0; font-weight: 600; word-break: break-word; }
+    .hint { font-size: 13px; color: var(--muted); margin-top: 16px; line-height: 1.5; }
+    .actions { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+    button {
+      font-family: inherit; font-size: 15px; font-weight: 600; border-radius: 11px; cursor: pointer;
+      padding: 14px 16px; border: 1px solid transparent; transition: background .15s, border-color .15s;
+    }
+    .btn-primary { background: var(--brand); color: #fff; }
+    .btn-primary:hover { background: var(--brand-2); }
+    .btn-ghost { background: #fff; border-color: var(--line); color: var(--ink); }
+    .btn-ghost:hover { border-color: #cbd5d9; }
+    .btn:disabled { opacity: .6; cursor: default; }
+    textarea {
+      width: 100%; min-height: 84px; resize: vertical; padding: 12px; border-radius: 11px;
+      border: 1px solid var(--line); font-family: inherit; font-size: 14px; margin-top: 10px;
+    }
+    textarea:focus { outline: 2px solid rgba(15,76,92,.25); border-color: var(--brand); }
+    .state { border-radius: 12px; padding: 16px; margin-bottom: 18px; font-size: 14px; line-height: 1.5; }
+    .state strong { display: block; font-size: 16px; margin-bottom: 4px; }
+    .state.ok { background: var(--ok-soft); color: var(--ok); }
+    .state.warn { background: var(--warn-soft); color: var(--warn); }
+    .state.error { background: var(--danger-soft); color: var(--danger); }
+    .contact { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); line-height: 1.7; }
+    .contact a { color: var(--brand); text-decoration: none; font-weight: 600; }
+    .loading { display: grid; place-items: center; min-height: 180px; color: var(--muted); font-size: 14px; gap: 12px; }
+    .spinner {
+      width: 26px; height: 26px; border-radius: 50%; border: 3px solid var(--line);
+      border-top-color: var(--brand); animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .hidden { display: none !important; }
+    footer { font-size: 12px; color: var(--muted); text-align: center; max-width: 520px; }
+  </style>
+</head>
+<body>
+  <div class="brand"><span class="brand-mark">✓</span><span id="brand-name">Terminbestätigung</span></div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="kicker" id="kicker">Ihr Termin</div>
+      <h1 id="headline">Termin wird geladen …</h1>
+    </div>
+    <div class="card-body" id="body">
+      <div class="loading"><div class="spinner"></div><div>Einen Moment bitte …</div></div>
+    </div>
+  </div>
+
+  <footer id="footer">Bitte prüfen Sie den Termin und geben Sie uns kurz Bescheid.</footer>
+
+<script type="module">
+const token = location.pathname.split('/').filter(Boolean).pop();
+const body = document.getElementById('body');
+const headline = document.getElementById('headline');
+const kicker = document.getElementById('kicker');
+const footer = document.getElementById('footer');
+const brandName = document.getElementById('brand-name');
+
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[char]));
+
+const dayNames = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+const fmtDate = (value) => new Date(value).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+const fmtTime = (value) => new Date(value).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+const fmtDay = (value) => dayNames[new Date(value).getDay()];
+
+async function request(path, options) {
+  const response = await fetch(path, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Unbekannter Fehler');
+  return data;
+}
+
+function addressLine(address) {
+  const parts = [address.street, [address.zip, address.city].filter(Boolean).join(' ')].filter(Boolean);
+  return parts.join(', ') || '–';
+}
+
+function detailRows(data) {
+  return `
+    <dl>
+      <dt>Termin</dt><dd>${esc(data.appointment.title)}</dd>
+      <dt>Kunde</dt><dd>${esc(data.customer.name || '–')}</dd>
+      <dt>Adresse</dt><dd>${esc(addressLine(data.address))}</dd>
+      <dt>Monteur</dt><dd>${esc(data.employee.name || 'wird noch festgelegt')}</dd>
+      ${data.order ? `<dt>Vorgang</dt><dd>${esc(data.order.number)}</dd>` : ''}
+    </dl>`;
+}
+
+function statusBox(data) {
+  const { confirmed_at: confirmed, declined_at: declined, customer_reply: reply } = data.appointment;
+  if (confirmed) {
+    return `<div class="state ok"><strong>Termin bestätigt</strong>
+      Vielen Dank! Wir sind am ${esc(fmtDate(data.appointment.start_at))} um ${esc(fmtTime(data.appointment.start_at))} Uhr bei Ihnen.
+      Bestätigt am ${esc(fmtDate(confirmed))}.</div>`;
+  }
+  if (declined) {
+    return `<div class="state warn"><strong>Termin abgelehnt</strong>
+      Sie haben uns mitgeteilt, dass dieser Termin nicht passt${reply ? `: „${esc(reply)}“` : ''}.
+      Wir melden uns, um einen neuen Termin zu finden.</div>`;
+  }
+  return '';
+}
+
+function contactBlock(data) {
+  const company = data.company || {};
+  return `<div class="contact">
+    ${company.name ? `<div><strong>${esc(company.name)}</strong></div>` : ''}
+    ${company.phone ? `<div>Telefon: <a href="tel:${esc(String(company.phone).replace(/[^+\d]/g, ''))}">${esc(company.phone)}</a></div>` : ''}
+    ${company.email ? `<div>E-Mail: <a href="mailto:${esc(company.email)}">${esc(company.email)}</a></div>` : ''}
+  </div>`;
+}
+
+function render(data) {
+  const appointment = data.appointment;
+  const company = data.company || {};
+  if (company.name) {
+    brandName.textContent = company.name;
+    document.title = `Termin bestätigen · ${company.name}`;
+  }
+  headline.textContent = `${fmtDay(appointment.start_at)}, ${fmtDate(appointment.start_at)}`;
+  kicker.textContent = appointment.confirmed_at ? 'Terminbestätigung' : 'Ihr Termin';
+
+  const open = !appointment.confirmed_at && !appointment.declined_at;
+  const actions = open
+    ? `<div class="actions">
+        <button class="btn-primary" id="confirm">Termin bestätigen</button>
+        <button class="btn-ghost" id="decline-toggle">Termin passt nicht</button>
+        <div id="decline-area" class="hidden">
+          <textarea id="decline-text" maxlength="500" placeholder="Optional: Grund oder Wunschtermin (z. B. „bitte nachmittags“)"></textarea>
+          <div class="actions">
+            <button class="btn-primary" id="decline-send">Rückmeldung senden</button>
+          </div>
+        </div>
+      </div>`
+    : `<div class="actions">
+        <button class="btn-ghost" id="change">${appointment.confirmed_at ? 'Termin passt doch nicht' : 'Doch bestätigen'}</button>
+      </div>`;
+
+  body.innerHTML = `
+    <div class="when">
+      <div>
+        <div class="date">${esc(fmtDate(appointment.start_at))}</div>
+        <div class="time">${esc(fmtTime(appointment.start_at))} – ${esc(fmtTime(appointment.end_at))} Uhr</div>
+      </div>
+      <div class="dow">${esc(fmtDay(appointment.start_at))}</div>
+    </div>
+    ${statusBox(data)}
+    ${detailRows(data)}
+    ${open ? `<div class="hint">Bitte bestätigen Sie den Termin kurz – dann weiß unser Team, dass alles passt.</div>` : ''}
+    ${actions}
+    ${contactBlock(data)}
+  `;
+
+  const run = async (button, path, payload) => {
+    button.disabled = true;
+    const label = button.textContent;
+    button.textContent = 'Wird gesendet …';
+    try {
+      const updated = await request(`/api/public/appointments/${token}/${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+      });
+      render(updated);
+      footer.textContent = 'Vielen Dank für Ihre Rückmeldung.';
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = label;
+      footer.innerHTML = `<span style="color:#b91c1c">${esc(error.message)}</span>`;
+    }
+  };
+
+  body.querySelector('#confirm')?.addEventListener('click', (event) => run(event.currentTarget, 'confirm'));
+  body.querySelector('#decline-toggle')?.addEventListener('click', () => {
+    body.querySelector('#decline-area')?.classList.toggle('hidden');
+    body.querySelector('#decline-text')?.focus();
+  });
+  body.querySelector('#decline-send')?.addEventListener('click', (event) => {
+    run(event.currentTarget, 'decline', { message: body.querySelector('#decline-text')?.value || '' });
+  });
+  body.querySelector('#change')?.addEventListener('click', (event) => {
+    if (appointment.confirmed_at) {
+      body.querySelector('#change').outerHTML = `
+        <div id="decline-area">
+          <textarea id="decline-text" maxlength="500" placeholder="Optional: Grund oder Wunschtermin"></textarea>
+          <div class="actions"><button class="btn-primary" id="decline-send">Rückmeldung senden</button></div>
+        </div>`;
+      body.querySelector('#decline-send').addEventListener('click', (ev) => {
+        run(ev.currentTarget, 'decline', { message: body.querySelector('#decline-text')?.value || '' });
+      });
+    } else {
+      run(event.currentTarget, 'confirm');
+    }
+  });
+}
+
+async function load() {
+  try {
+    const data = await request(`/api/public/appointments/${token}`);
+    render(data);
+  } catch (error) {
+    headline.textContent = 'Termin nicht gefunden';
+    body.innerHTML = `<div class="state error"><strong>Dieser Link funktioniert nicht</strong>
+      ${esc(error.message)}<br />Bitte wenden Sie sich direkt an uns.</div>`;
+    footer.textContent = 'Tipp: Prüfen Sie, ob der Link vollständig kopiert wurde.';
+  }
+}
+
+load();
+</script>
+</body>
+</html>

@@ -63,6 +63,13 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // Terminbestätigung für Kunden: eigene, schlanke Seite ohne App-Hülle
+  if (url.pathname.startsWith('/termin/')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    createReadStream(join(PUBLIC, 'termin.html')).pipe(res);
+    return;
+  }
+
   // Statische Dateien
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, '');

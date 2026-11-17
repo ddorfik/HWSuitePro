@@ -68,8 +68,10 @@ Demo-Logins: `chef/chef123`, `vorgesetzt/vorgesetzt123`, `buero/buero123`,
 4. **Deutsch in der UI, Englisch im Code.** Bezeichner, Tabellen und Spalten englisch;
    Beschriftungen, Meldungen und Doku deutsch.
 5. **Bestehende Werte nicht umbenennen.** Statuswerte (`neu`, `geplant`, `in_arbeit`,
-   `erledigt`, `abgerechnet`, `storniert`, `angenommen`) und Berichtsstatus
-   (`entwurf`, `eingereicht`, `freigegeben`, `abgerechnet`) stehen so in DB und API.
+   `erledigt`, `abgerechnet`, `storniert`, `angenommen`), Berichtsstatus
+   (`entwurf`, `eingereicht`, `freigegeben`, `abgerechnet`) und Terminarten
+   (`baustelle`, `kundenbesuch`, `meeting`, `personal`, `notdienst`, `fortbildung`,
+   `lieferant`, `sonstiges`) stehen so in DB und API.
 6. **Mobile zuerst.** Neue Ansichten müssen auf dem Smartphone bedienbar sein:
    Touch-Ziele, Bottom-Nav, keine Hover-Abhängigkeiten, kein horizontales Scrollen.
 7. **Sprachsteuerung nicht ausbremsen.** Sprachbefehle dürfen ein offenes Formular nicht
