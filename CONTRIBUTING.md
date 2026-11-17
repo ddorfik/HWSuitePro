@@ -51,11 +51,48 @@ Beim ersten Start entstehen Demo-Daten und Demo-Benutzer (siehe README).
 
 ## Arbeitsablauf
 
-- `main` ist geschützt und immer lauffähig.
+- `main` ist der gemeinsame, immer lauffähige Stand.
 - Arbeiten auf Feature-Branches: `feature/kurzbeschreibung`, `fix/kurzbeschreibung`.
 - Aussagekräftige Commits (z. B. `fix: Monteur sieht fremde Fotos nicht mehr`).
 - Pull Request gegen `main` mit kurzer Beschreibung und der Checkliste aus dem Template.
-- Mindestens eine Review durch eine andere Person; CI (Tests) muss grün sein.
+- CI (Tests) muss grün sein; bei Team-Arbeit mindestens eine Review.
+
+```bash
+git checkout -b feature/mein-thema
+# … ändern …
+git add -A
+git commit -m "feat: kurze Beschreibung"
+git push -u origin feature/mein-thema
+# danach auf GitHub: „Compare & pull request“
+```
+
+### main schützen
+
+GitHub bietet Branch-Protection-Regeln für **private Repositories** nur mit
+**GitHub Pro/Team** an. Falls der Plan das nicht enthält, gibt es zwei günstige Wege:
+
+1. **Lokaler Hook (empfohlen, kostenlos).** Das Repo bringt `.githooks/pre-push` mit.
+   Einmal pro Arbeitskopie aktivieren:
+
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+
+   Danach blockiert Git direkte Pushes auf `main` und erinnert an den Branch-Workflow.
+   Notfall-Ausnahme: `git push --no-verify`.
+
+2. **Konvention + CI.** Auch ohne erzwungene Regeln zeigt die CI bei jedem Push und
+   Pull Request sofort, ob die Tests grün sind. Bitte trotzdem immer über Branches
+   und Pull Requests arbeiten.
+
+### GitHub-Einstellungen (falls Pro/Team vorhanden)
+
+Settings → Branches → *Add classic branch protection rule*:
+
+- Branch name pattern: `main`
+- ✅ Require a pull request before merging
+- ✅ Require status checks to pass → Check **Tests** auswählen
+- ✅ Do not allow bypassing the above settings
 
 ## Tests
 

@@ -366,3 +366,9 @@ npm test      # Tests
 
 Wichtig: Der Ordner `data/` (SQLite-Datenbank, PDFs, Fotos) ist **nicht** Teil des Repositories –
 er wird lokal erzeugt und kann echte Kundendaten enthalten. Bitte niemals einchecken.
+
+Empfohlen nach dem Klonen einmalig den lokalen Schutz für `main` aktivieren:
+
+```bash
+git config core.hooksPath .githooks
+```

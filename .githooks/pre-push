@@ -1,0 +1,37 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# HandwerkPro – lokaler Schutz für den main-Branch
+#
+# Verhindert versehentliche Direkt-Pushes auf main. Änderungen laufen über
+# Feature-Branches und Pull Requests.
+#
+# Aktivieren (einmal pro Arbeitskopie):
+#   git config core.hooksPath .githooks
+#
+# Bewusst umgehen (nur wenn wirklich nötig):
+#   git push --no-verify
+# ---------------------------------------------------------------------------
+
+remote="$1"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Löschen eines Branches erlauben (remote_sha = 0000…)
+  case "$remote_sha" in 0000000000000000000000000000000000000000) continue ;; esac
+
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    echo ""
+    echo "  ⛔  Direkt-Push auf 'main' ist gesperrt."
+    echo ""
+    echo "  Bitte so arbeiten:"
+    echo "    git checkout -b feature/mein-thema"
+    echo "    git add -A && git commit -m \"feat: ...\""
+    echo "    git push -u origin feature/mein-thema"
+    echo "  Danach auf GitHub einen Pull Request öffnen."
+    echo ""
+    echo "  (Ausnahme: git push --no-verify)"
+    echo ""
+    exit 1
+  fi
+done
+
+exit 0
