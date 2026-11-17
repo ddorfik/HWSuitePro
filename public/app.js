@@ -190,6 +190,7 @@ const api = {
       } catch { /* ignore */ }
       const error = new Error(message);
       error.status = response.status;
+      if (data?.code) error.code = data.code;
       if (response.status === 401 && !path.startsWith('/api/auth/login')) showLogin();
       throw error;
     }
@@ -2026,6 +2027,13 @@ function contractForm(contract = null) {
 }
 
 /* ------------------------------------------------------------------ Planung */
+function startOfMonth(date = new Date()) {
+  const d = new Date(date);
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 function startOfWeek(date = new Date()) {
   const d = new Date(date);
   const day = (d.getDay() + 6) % 7;
@@ -2036,12 +2044,22 @@ function startOfWeek(date = new Date()) {
 
 async function renderPlanning() {
   if (!state.weekStart) state.weekStart = startOfWeek();
-  const start = new Date(state.weekStart);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 6);
-  const from = toDateInput(start);
-  const to = toDateInput(end);
-  const appointments = await api.get(`/api/appointments?from=${from}&to=${to}`);
+  if (!state.monthStart) state.monthStart = startOfMonth(new Date());
+  const mode = state.calendarMode || 'week';
+
+  // Zeitraum je Ansicht
+  let start;
+  let end;
+  if (mode === 'month') {
+    start = startOfWeek(state.monthStart);
+    end = new Date(start);
+    end.setDate(end.getDate() + 41);
+  } else {
+    start = new Date(state.weekStart);
+    end = new Date(start);
+    end.setDate(end.getDate() + 6);
+  }
+  const appointments = await api.get(`/api/appointments?from=${toDateInput(start)}&to=${toDateInput(end)}`);
   const term = state.search.toLowerCase();
   const visible = term
     ? appointments.filter((a) => `${a.title} ${a.order_number || ''} ${customerName(a)} ${a.employee_name || ''} ${kindLabel(a.kind)}`.toLowerCase().includes(term))
@@ -2049,6 +2067,7 @@ async function renderPlanning() {
   const kindFilter = state.planningKind || 'alle';
   const kindsPresent = [...new Set(visible.map((a) => a.kind || 'baustelle'))];
   const shown = kindFilter === 'alle' ? visible : visible.filter((a) => (a.kind || 'baustelle') === kindFilter);
+  const todayKey = todayISO();
 
   const days = [...Array(7)].map((_, index) => {
     const date = new Date(start);
@@ -2056,7 +2075,85 @@ async function renderPlanning() {
     return date;
   });
   const hours = [...Array(13)].map((_, index) => index + 7);
-  const todayKey = todayISO();
+  const rangeLabel = mode === 'month'
+    ? state.monthStart.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })
+    : `${start.toLocaleDateString('de-DE', { day: '2-digit', month: 'long' })} – ${end.toLocaleDateString('de-DE', { day: '2-digit', month: 'long', year: 'numeric' })}`;
+  const countLabel = mode === 'month' ? 'in diesem Monat' : 'in dieser Woche';
+
+  const eventMarkup = (event) => {
+    const startDate = new Date(event.start_at);
+    const endDate = new Date(event.end_at);
+    const startMinutes = startDate.getHours() * 60 + startDate.getMinutes();
+    const endMinutes = endDate.getHours() * 60 + endDate.getMinutes();
+    const top = ((startMinutes - 7 * 60) / 60) * 52;
+    const height = Math.max(26, ((endMinutes - startMinutes) / 60) * 52);
+    const color = event.employee_color || '#0f4c5c';
+    const info = kindInfo(event.kind);
+    return `<div class="event" style="top:${top}px;height:${height}px;border-left-color:${color};background:${color}18;color:${color}"
+      data-action="open-appointment" data-id="${event.id}" data-order="${event.order_id || ''}" title="${esc(event.title)} · ${esc(info.label)}">
+      <div class="e-time"><span class="e-kdot" style="background:${info.color}"></span>${fmtTime(event.start_at)}–${fmtTime(event.end_at)}</div>
+      <div class="e-title">${esc(event.order_title || event.title)}</div>
+      <div class="e-sub">${esc(customerName(event))}</div>
+      <div class="e-sub">${esc(event.employee_name || '')}</div>
+      ${event.confirmed_at ? '<span class="e-flag ok" title="Vom Kunden bestätigt">✓</span>' : event.declined_at ? '<span class="e-flag no" title="Vom Kunden abgelehnt">✕</span>' : ''}
+    </div>`;
+  };
+
+  const weekHtml = `
+    <div class="calendar">
+      <div class="cal-grid">
+        <div class="cal-head"></div>
+        ${days.map((date) => {
+          const key = toDateInput(date);
+          return `<div class="cal-head-cell ${key === todayKey ? 'today' : ''}">
+            <div class="dow">${date.toLocaleDateString('de-DE', { weekday: 'short' })}</div>
+            <div class="day">${date.getDate()}</div>
+          </div>`;
+        }).join('')}
+        <div class="cal-times">
+          ${hours.map((hour) => `<div class="cal-hour">${String(hour).padStart(2, '0')}:00</div>`).join('')}
+        </div>
+        ${days.map((date) => {
+          const key = toDateInput(date);
+          const dayEvents = shown.filter((a) => toDateInput(a.start_at) === key);
+          return `<div class="cal-day ${key === todayKey ? 'today' : ''}" data-date="${key}">
+            ${hours.map(() => '<div class="slot"></div>').join('')}
+            ${dayEvents.map(eventMarkup).join('')}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+
+  const monthDays = [...Array(42)].map((_, index) => {
+    const date = new Date(start);
+    date.setDate(date.getDate() + index);
+    return date;
+  });
+
+  const monthHtml = `
+    <div class="month-grid">
+      ${['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((label) => `<div class="month-head">${label}</div>`).join('')}
+      ${monthDays.map((date) => {
+        const key = toDateInput(date);
+        const events = shown.filter((a) => toDateInput(a.start_at) === key);
+        const otherMonth = date.getMonth() !== state.monthStart.getMonth();
+        return `<div class="month-day ${otherMonth ? 'other' : ''} ${key === todayKey ? 'today' : ''}" data-date="${key}">
+          <div class="md-num">${date.getDate()}</div>
+          <div class="md-events">
+            ${events.slice(0, 3).map((event) => {
+              const info = kindInfo(event.kind);
+              return `<div class="md-event" data-action="open-appointment" data-id="${event.id}" data-order="${event.order_id || ''}" title="${esc(event.title)} · ${esc(info.label)}">
+                <span class="md-dot" style="background:${info.color}"></span>
+                <span class="md-time">${fmtTime(event.start_at)}</span>
+                <span class="md-title">${esc(event.title)}</span>
+                ${event.confirmed_at ? '<span class="md-flag ok">✓</span>' : event.declined_at ? '<span class="md-flag no">✕</span>' : ''}
+              </div>`;
+            }).join('')}
+            ${events.length > 3 ? `<div class="md-more">+${events.length - 3} weitere</div>` : ''}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
 
   view.innerHTML = `
     <div class="toolbar">
@@ -2070,59 +2167,24 @@ async function renderPlanning() {
             <span class="count">${visible.filter((a) => (a.kind || 'baustelle') === kind).length}</span>
           </button>`).join('')}
       </div>
+      <div class="view-switch">
+        <button class="chip ${mode === 'week' ? 'active' : ''}" data-action="calendar-mode" data-mode="week">Woche</button>
+        <button class="chip ${mode === 'month' ? 'active' : ''}" data-action="calendar-mode" data-mode="month">Monat</button>
+      </div>
     </div>
     <div class="card">
       <div class="card-head">
         <div>
-          <h2>${start.toLocaleDateString('de-DE', { day: '2-digit', month: 'long' })} – ${end.toLocaleDateString('de-DE', { day: '2-digit', month: 'long', year: 'numeric' })}</h2>
-          <div class="sub">${shown.length} ${shown.length === 1 ? 'Termin' : 'Termine'} in dieser Woche</div>
+          <h2>${rangeLabel}</h2>
+          <div class="sub">${shown.length} ${shown.length === 1 ? 'Termin' : 'Termine'} ${countLabel}</div>
         </div>
         <div class="right">
-          <button class="btn sm" data-action="week-prev">‹</button>
-          <button class="btn sm" data-action="week-today">Heute</button>
-          <button class="btn sm" data-action="week-next">›</button>
+          <button class="btn sm" data-action="calendar-prev">‹</button>
+          <button class="btn sm" data-action="calendar-today">Heute</button>
+          <button class="btn sm" data-action="calendar-next">›</button>
         </div>
       </div>
-      <div class="calendar">
-        <div class="cal-grid">
-          <div class="cal-head"></div>
-          ${days.map((date) => {
-            const key = toDateInput(date);
-            return `<div class="cal-head-cell ${key === todayKey ? 'today' : ''}">
-              <div class="dow">${date.toLocaleDateString('de-DE', { weekday: 'short' })}</div>
-              <div class="day">${date.getDate()}</div>
-            </div>`;
-          }).join('')}
-          <div class="cal-times">
-            ${hours.map((hour) => `<div class="cal-hour">${String(hour).padStart(2, '0')}:00</div>`).join('')}
-          </div>
-          ${days.map((date) => {
-            const key = toDateInput(date);
-            const dayEvents = shown.filter((a) => toDateInput(a.start_at) === key);
-            return `<div class="cal-day ${key === todayKey ? 'today' : ''}" data-date="${key}">
-              ${hours.map(() => '<div class="slot"></div>').join('')}
-              ${dayEvents.map((event) => {
-                const startDate = new Date(event.start_at);
-                const endDate = new Date(event.end_at);
-                const startMinutes = startDate.getHours() * 60 + startDate.getMinutes();
-                const endMinutes = endDate.getHours() * 60 + endDate.getMinutes();
-                const top = ((startMinutes - 7 * 60) / 60) * 52;
-                const height = Math.max(26, ((endMinutes - startMinutes) / 60) * 52);
-                const color = event.employee_color || '#0f4c5c';
-                const info = kindInfo(event.kind);
-                return `<div class="event" style="top:${top}px;height:${height}px;border-left-color:${color};background:${color}18;color:${color}"
-                  data-action="open-appointment" data-id="${event.id}" data-order="${event.order_id || ''}" title="${esc(event.title)} · ${esc(info.label)}">
-                  <div class="e-time"><span class="e-kdot" style="background:${info.color}"></span>${fmtTime(event.start_at)}–${fmtTime(event.end_at)}</div>
-                  <div class="e-title">${esc(event.order_title || event.title)}</div>
-                  <div class="e-sub">${esc(customerName(event))}</div>
-                  <div class="e-sub">${esc(event.employee_name || '')}</div>
-                  ${event.confirmed_at ? '<span class="e-flag ok" title="Vom Kunden bestätigt">✓</span>' : event.declined_at ? '<span class="e-flag no" title="Vom Kunden abgelehnt">✕</span>' : ''}
-                </div>`;
-              }).join('')}
-            </div>`;
-          }).join('')}
-        </div>
-      </div>
+      ${mode === 'month' ? monthHtml : weekHtml}
       <div class="cal-legend">
         ${state.employees.filter((e) => e.active).map((employee) => `
           <span class="legend-item"><span class="legend-dot" style="background:${esc(employee.color)}"></span>${esc(employee.name)}</span>`).join('')}
@@ -2130,9 +2192,19 @@ async function renderPlanning() {
       </div>
     </div>`;
 
+  const openAt = (date, hour = 8, minute = 0) => {
+    if (!can('planning.manage')) return;
+    const pad = (n) => String(n).padStart(2, '0');
+    appointmentForm(null, {
+      date,
+      time: `${pad(hour)}:${pad(minute)}`,
+      endTime: `${pad(Math.min(20, hour + 1))}:${pad(minute)}`,
+    });
+  };
+
+  // Klick in freie Fläche: Termin anlegen
   $$('.cal-day', view).forEach((day) => {
     day.addEventListener('click', (event) => {
-      if (!can('planning.manage')) return;
       if (event.target.closest('.event')) return;
       const rect = day.getBoundingClientRect();
       const y = event.clientY - rect.top;
@@ -2140,12 +2212,13 @@ async function renderPlanning() {
       const hour = 7 + Math.floor(totalMinutes / 60);
       const minute = totalMinutes % 60;
       if (hour >= 20) return;
-      const pad = (n) => String(n).padStart(2, '0');
-      appointmentForm(null, {
-        date: day.dataset.date,
-        time: `${pad(hour)}:${pad(minute)}`,
-        endTime: `${pad(Math.min(20, hour + 1))}:${pad(minute)}`,
-      });
+      openAt(day.dataset.date, hour, minute);
+    });
+  });
+  $$('.month-day', view).forEach((day) => {
+    day.addEventListener('click', (event) => {
+      if (event.target.closest('.md-event')) return;
+      openAt(day.dataset.date, 8, 0);
     });
   });
 }
@@ -2278,11 +2351,35 @@ function appointmentConfirmSection(appointment) {
       <button class="btn sm" data-action="appointment-copy" data-id="${appointment.id}">${icon('file')} Kopieren</button>
     </div>
     <div class="small muted" style="margin-top:8px">${statusText}</div>
+    ${appointment.mail_sent_at ? `<div class="small muted">Per E-Mail gesendet: ${fmtDateTime(appointment.mail_sent_at)}</div>` : ''}
     ${manage ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
       <button class="btn sm" data-action="appointment-mail" data-id="${appointment.id}">${icon('mail')} Per E-Mail senden</button>
       <button class="btn sm" data-action="appointment-reset" data-id="${appointment.id}">${icon('refresh')} Zurücksetzen</button>
     </div>` : ''}
   </div>`;
+}
+
+async function openMailTo(appointment) {
+  const link = appointmentLink(appointment);
+  if (!link) return;
+  let email = '';
+  const customerId = appointment.customer_id;
+  if (customerId) {
+    try {
+      email = (await api.get(`/api/customers/${customerId}`)).customer.email || '';
+    } catch { email = ''; }
+  }
+  const subject = `Termin am ${fmtDate(appointment.start_at)} um ${fmtTime(appointment.start_at)} Uhr`;
+  const lines = [
+    'Guten Tag,',
+    '',
+    'bitte bestätigen Sie kurz unseren Termin:',
+    `${fmtDate(appointment.start_at)}, ${fmtTime(appointment.start_at)}–${fmtTime(appointment.end_at)} Uhr`,
+  ];
+  if (appointment.title) lines.push(`Leistung: ${appointment.title}`);
+  lines.push('', 'Zum Bestätigen einfach diesen Link öffnen:', link, '', 'Vielen Dank!');
+  if (state.settings?.company_name) lines.push(state.settings.company_name);
+  location.href = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join('\n'))}`;
 }
 
 async function copyText(text) {
@@ -3314,7 +3411,9 @@ async function renderSettings() {
   const input = (name, label, opts = {}) => `
     <div class="field ${opts.full ? 'full' : ''}">
       <label>${label}</label>
-      <input name="${name}" type="${opts.type || 'text'}" value="${esc(settings[name])}" ${opts.step ? `step="${opts.step}"` : ''} />
+      <input name="${name}" type="${opts.type || 'text'}" value="${esc(settings[name])}"
+        ${opts.step ? `step="${opts.step}"` : ''} ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ''} />
+      ${opts.hint ? `<span class="hint">${esc(opts.hint)}</span>` : ''}
     </div>`;
 
   view.innerHTML = `
@@ -3403,6 +3502,42 @@ async function renderSettings() {
             <a class="btn sm" href="/api/export/kunden.csv">${icon('download')} Kunden</a>
             <a class="btn sm" href="/api/export/lager.csv">${icon('download')} Lager</a>
           </div>
+        </div>
+
+        <div class="card form-card">
+          <h2>E-Mail-Versand</h2>
+          <div class="fc-sub">Für Terminbestätigungen und Rückmeldungen. Die Zugangsdaten bleiben lokal in der Datenbank.</div>
+          <div class="form-grid">
+            ${input('smtp_host', 'SMTP-Server', { full: true, placeholder: 'z. B. smtp.ionos.de' })}
+            ${input('smtp_port', 'Port', { type: 'number', step: '1', hint: '587 mit STARTTLS, 465 mit SSL/TLS' })}
+            <div class="field">
+              <label>Verschlüsselung</label>
+              <label class="check"><input type="checkbox" name="smtp_secure" ${settings.smtp_secure === '1' ? 'checked' : ''} /> SSL/TLS direkt (Port 465)</label>
+              <span class="hint">Ohne Häkchen wird STARTTLS genutzt, wenn der Server es anbietet.</span>
+            </div>
+            ${input('smtp_user', 'Benutzername')}
+            <div class="field">
+              <label>Passwort</label>
+              <input type="password" name="smtp_password" value="${esc(settings.smtp_password)}" autocomplete="new-password" />
+              <span class="hint">Leer bzw. unverändert lassen, um das gespeicherte Passwort zu behalten.</span>
+            </div>
+            ${input('smtp_from', 'Absenderadresse', { placeholder: 'z. B. info@firma.de' })}
+            ${input('smtp_from_name', 'Absendername', { placeholder: 'z. B. Möller Gas & Wasser GmbH' })}
+            ${input('public_url', 'Öffentliche Adresse der App', { full: true, placeholder: 'https://app.firma.de', hint: 'Basis für Links in E-Mails. Leer lassen, um die aktuelle Adresse zu verwenden.' })}
+          </div>
+          <div class="toggle-row">
+            <div class="tr-main">
+              <div class="tr-title">Rückmeldungen per E-Mail</div>
+              <div class="tr-sub">Das Büro erhält eine Nachricht, wenn ein Kunde bestätigt oder absagt.</div>
+            </div>
+            <label class="switch"><input type="checkbox" name="mail_notify_replies" ${settings.mail_notify_replies === '1' ? 'checked' : ''} /><span></span></label>
+          </div>
+          <div class="hr"></div>
+          <div class="mail-test">
+            <input id="mail-test-to" type="email" value="${esc(settings.company_email)}" placeholder="Empfängeradresse" />
+            <button class="btn sm" type="button" data-action="mail-test">${icon('send')} Testmail</button>
+          </div>
+          <div class="small muted" style="margin-top:6px">Einstellungen zuerst speichern – der Test nutzt die gespeicherten Werte.</div>
         </div>
 
         <div class="card form-card full">
@@ -3702,25 +3837,34 @@ const ACTIONS = {
   },
   'appointment-mail': async () => {
     const appointment = state.currentAppointment;
-    const link = appointmentLink(appointment);
-    if (!link) return;
-    let email = '';
-    if (appointment?.customer_id) {
-      try {
-        email = (await api.get(`/api/customers/${appointment.customer_id}`)).customer.email || '';
-      } catch { email = ''; }
+    if (!appointment) return;
+    try {
+      const result = await api.post(`/api/appointments/${appointment.id}/confirm-mail`);
+      toast(`Terminbestätigung an ${result.to} gesendet.`);
+      await openAppointment(appointment.id);
+      return;
+    } catch (error) {
+      if (error.code !== 'mail_not_configured') {
+        toast(error.message, 'error');
+        return;
+      }
+      // Kein SMTP eingerichtet: lokales Mailprogramm als Ausweg
+      toast('Kein E-Mail-Versand eingerichtet – öffne das Mailprogramm.', 'info');
     }
-    const subject = `Termin am ${fmtDate(appointment.start_at)} um ${fmtTime(appointment.start_at)} Uhr`;
-    const lines = [
-      'Guten Tag,',
-      '',
-      'bitte bestätigen Sie kurz unseren Termin:',
-      `${fmtDate(appointment.start_at)}, ${fmtTime(appointment.start_at)}–${fmtTime(appointment.end_at)} Uhr`,
-    ];
-    if (appointment.title) lines.push(`Leistung: ${appointment.title}`);
-    lines.push('', 'Zum Bestätigen einfach diesen Link öffnen:', link, '', 'Vielen Dank!');
-    if (state.settings?.company_name) lines.push(state.settings.company_name);
-    location.href = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join('\n'))}`;
+    await openMailTo(appointment);
+  },
+  'mail-test': async () => {
+    const input = $('#mail-test-to');
+    const button = $('[data-action="mail-test"]');
+    if (button) button.disabled = true;
+    try {
+      const result = await api.post('/api/mail/test', { to: input?.value.trim() || '' });
+      toast(`Testmail an ${result.to} gesendet.`);
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      if (button) button.disabled = false;
+    }
   },
   'appointment-reset': async (id) => {
     if (!confirm('Bestätigung bzw. Ablehnung zurücksetzen? Der Link bleibt gültig.')) return;
@@ -3743,16 +3887,32 @@ const ACTIONS = {
       toast(error.message, 'error');
     }
   },
-  'week-prev': () => {
-    state.weekStart.setDate(state.weekStart.getDate() - 7);
+  'calendar-mode': (id, el) => {
+    state.calendarMode = el.dataset.mode === 'month' ? 'month' : 'week';
+    if (state.calendarMode === 'month') {
+      state.monthStart = startOfMonth(state.weekStart || new Date());
+    }
     renderPlanning();
   },
-  'week-next': () => {
-    state.weekStart.setDate(state.weekStart.getDate() + 7);
+  'calendar-prev': () => {
+    if ((state.calendarMode || 'week') === 'month') {
+      state.monthStart.setMonth(state.monthStart.getMonth() - 1);
+    } else {
+      state.weekStart.setDate(state.weekStart.getDate() - 7);
+    }
     renderPlanning();
   },
-  'week-today': () => {
+  'calendar-next': () => {
+    if ((state.calendarMode || 'week') === 'month') {
+      state.monthStart.setMonth(state.monthStart.getMonth() + 1);
+    } else {
+      state.weekStart.setDate(state.weekStart.getDate() + 7);
+    }
+    renderPlanning();
+  },
+  'calendar-today': () => {
     state.weekStart = startOfWeek();
+    state.monthStart = startOfMonth();
     renderPlanning();
   },
   'filter-reports': (id, el) => { state.reportsFilter = el.dataset.filter; renderReports(); },

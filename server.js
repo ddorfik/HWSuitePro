@@ -56,7 +56,7 @@ async function handleRequest(req, res) {
   }
 
   if (url.pathname.startsWith('/api/')) {
-    if (!handleApi(req, res, url)) {
+    if (!(await handleApi(req, res, url))) {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: 'API-Endpunkt nicht gefunden' }));
     }

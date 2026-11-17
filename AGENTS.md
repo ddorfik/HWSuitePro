@@ -47,6 +47,7 @@ Demo-Logins: `chef/chef123`, `vorgesetzt/vorgesetzt123`, `buero/buero123`,
 | `src/permissions.js` | Rollen und Rechte-Matrix – **einzige Wahrheit** |
 | `src/auth.js`, `src/password.js` | Sessions (`hp_session`-Cookie), scrypt |
 | `src/work.js` | Materialparser, Foto-Speicherung, Zeiterfassung |
+| `src/mail.js` | SMTP-Versand ohne Abhängigkeiten (TLS, STARTTLS, AUTH) |
 | `src/billing.js`, `src/automation.js` | Rechnungen, Automatik-Läufe |
 | `src/documents.js`, `src/pdf.js` | Dokumente und eigener PDF-Generator |
 | `public/app.js` | komplette SPA (Vanilla JS, kein Build-Schritt) |
@@ -61,7 +62,8 @@ Demo-Logins: `chef/chef123`, `vorgesetzt/vorgesetzt123`, `buero/buero123`,
    `{ permission: '…' }` oder `{ permissions: [ … ] }`; neue Rechte gehören in
    `src/permissions.js` **und** in die Rechte-Matrix der README.
 2. **Keine Laufzeitabhängigkeiten.** Kein `express`, kein `bcrypt`, kein Build-Tool,
-   kein CDN im Frontend. Das Projekt muss „Ordner kopieren, `npm start`, fertig" bleiben.
+   kein CDN im Frontend – auch E-Mails laufen über den eigenen Client in `src/mail.js`.
+   Das Projekt muss „Ordner kopieren, `npm start`, fertig" bleiben.
    Ausnahme nur nach ausdrücklicher Freigabe durch den Maintainer.
 3. **`data/` niemals committen.** Datenbank, PDFs, Fotos und Dokumente können echte
    Kundendaten enthalten. Ebenfalls tabu: `.env`, Zertifikate, Tokens, Logs.
