@@ -277,6 +277,15 @@ CREATE TABLE IF NOT EXISTS photos (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS customer_notes (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  text        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_customer_notes_customer ON customer_notes(customer_id);
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id);
@@ -301,6 +310,13 @@ function ensureColumn(table, column, definition) {
   }
 }
 ensureColumn('invoices', 'service_date', 'TEXT');
+// Terminbestätigung per Link: Kunde bestätigt oder lehnt einen Termin ab.
+ensureColumn('appointments', 'confirm_token', 'TEXT');
+ensureColumn('appointments', 'confirmed_at', 'TEXT');
+ensureColumn('appointments', 'declined_at', 'TEXT');
+ensureColumn('appointments', 'customer_reply', 'TEXT');
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_token
+  ON appointments(confirm_token) WHERE confirm_token IS NOT NULL;`);
 
 export const DEFAULT_SETTINGS = {
   app_name: 'HandwerkPro',

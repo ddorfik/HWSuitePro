@@ -649,7 +649,7 @@ function renderTechnicianDashboard(data) {
                 <div class="time-chip">${fmtTime(a.start_at)}<small>${fmtTime(a.end_at)}</small></div>
                 <div class="t-main">
                   <div class="t-title">${esc(a.order_title || a.title)}</div>
-                  <div class="t-sub">${esc(customerName(a))}${a.customer_street ? ` · ${esc(a.customer_street)}` : ''}</div>
+                  <div class="t-sub">${esc(customerName(a))}${a.customer_street ? ` · ${esc(a.customer_street)}` : ''}${a.confirmed_at ? ' · <span class="ok-text">✓ bestätigt</span>' : a.declined_at ? ' · <span class="no-text">✕ abgelehnt</span>' : ''}</div>
                 </div>
               </div>`).join('') : `<div class="empty">${icon('calendar')}<div>Keine Termine für heute</div></div>`}
           </div>
@@ -1482,6 +1482,7 @@ async function renderCustomers() {
 async function openCustomer(customerId) {
   const data = await api.get(`/api/customers/${customerId}`);
   const { customer, properties, orders, invoices } = data;
+  const notes = data.notes ?? [];
   const showMoney = can('invoices.view');
   const manage = can('customers.manage');
   const openSum = invoices.filter((i) => ['offen', 'teilweise', 'gemahnt'].includes(i.status))
@@ -1506,7 +1507,30 @@ async function openCustomer(customerId) {
       <div class="meta-item"><div class="k">Historie</div><div class="v">${orders.length} ${orders.length === 1 ? 'Auftrag' : 'Aufträge'}<small>${showMoney ? `${invoices.length} Rechnungen` : 'eigene Aufträge'}</small></div></div>
     </div>
 
-    ${customer.notes ? `<div class="subcard"><h4>Notiz</h4><div class="small">${esc(customer.notes)}</div></div>` : ''}
+    ${customer.notes ? `<div class="subcard"><h4>Hinweis</h4><div class="small">${esc(customer.notes)}</div></div>` : ''}
+
+    <div class="subcard">
+      <h4 style="display:flex;align-items:center">Notizen <span class="muted small" style="margin-left:8px;font-weight:500">${notes.length}</span></h4>
+      ${manage ? `<form id="customer-note-form" class="note-form">
+        <textarea id="customer-note-text" name="text" rows="2" maxlength="4000"
+          placeholder="Kurz notieren, was wichtig ist – z. B. „Schlüssel liegt beim Nachbarn“"></textarea>
+        <div class="field-tools">
+          <button class="btn sm" type="button" data-note-dictate>${icon('mic')} Diktieren</button>
+          <span class="hint" data-note-dictate-status></span>
+          <button class="btn sm primary" type="submit" style="margin-left:auto">${icon('plus')} Notiz speichern</button>
+        </div>
+      </form>` : ''}
+      ${notes.length ? `<div class="note-list">
+        ${notes.map((note) => `<div class="note-item">
+          <div class="note-meta">
+            <span class="strong">${esc(note.user_name)}</span>
+            <span>· ${fmtDateTime(note.created_at)}</span>
+            ${manage ? `<button class="icon-btn note-del" type="button" data-action="delete-customer-note" data-id="${note.id}" data-customer="${customer.id}" aria-label="Notiz löschen">${icon('trash')}</button>` : ''}
+          </div>
+          <div class="note-text">${esc(note.text)}</div>
+        </div>`).join('')}
+      </div>` : `<div class="small muted" style="margin-top:10px">Noch keine Notizen.</div>`}
+    </div>
 
     <div class="subcard">
       <h4 style="display:flex;align-items:center">Objekte ${manage ? `<button class="btn sm" style="margin-left:auto" data-action="new-property" data-customer="${customer.id}">+ Objekt</button>` : ''}</h4>
@@ -1562,6 +1586,27 @@ async function openCustomer(customerId) {
         <button class="btn sm danger" data-action="delete-customer" data-id="${customer.id}">${icon('trash')} Löschen</button>` : ''}
       </div>
       <button class="btn" data-action="close-modal">Schließen</button>`,
+  });
+
+  const noteForm = $('#customer-note-form');
+  noteForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const text = noteForm.elements.text.value.trim();
+    if (!text) {
+      toast('Bitte eine Notiz eingeben.', 'error');
+      noteForm.elements.text.focus();
+      return;
+    }
+    try {
+      await api.post(`/api/customers/${customer.id}/notes`, { text });
+      toast('Notiz gespeichert.');
+      await openCustomer(customer.id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+  $('[data-note-dictate]')?.addEventListener('click', () => {
+    listenInline($('#customer-note-text'), $('[data-note-dictate-status]'), 'Notiz');
   });
 }
 
@@ -1929,6 +1974,7 @@ async function renderPlanning() {
                   <div class="e-title">${esc(event.order_title || event.title)}</div>
                   <div class="e-sub">${esc(customerName(event))}</div>
                   <div class="e-sub">${esc(event.employee_name || '')}</div>
+                  ${event.confirmed_at ? '<span class="e-flag ok" title="Vom Kunden bestätigt">✓</span>' : event.declined_at ? '<span class="e-flag no" title="Vom Kunden abgelehnt">✕</span>' : ''}
                 </div>`;
               }).join('')}
             </div>`;
@@ -2022,6 +2068,7 @@ async function openAppointment(appointmentId, orderId) {
   const appointments = await api.get(`/api/appointments?from=${addDaysISO(todayISO(), -60)}&to=${addDaysISO(todayISO(), 120)}`);
   const appointment = appointments.find((a) => a.id === Number(appointmentId));
   if (!appointment) return;
+  state.currentAppointment = appointment;
   openModal({
     title: appointment.title,
     subtitle: `${fmtDate(appointment.start_at)} · ${fmtTime(appointment.start_at)}–${fmtTime(appointment.end_at)} Uhr`,
@@ -2031,7 +2078,8 @@ async function openAppointment(appointmentId, orderId) {
         <dt>Kunde</dt><dd>${esc(customerName(appointment) || '–')}</dd>
         <dt>Auftrag</dt><dd>${esc(appointment.order_number || '–')}</dd>
         <dt>Notiz</dt><dd>${esc(appointment.notes || '–')}</dd>
-      </dl>`,
+      </dl>
+      ${appointmentConfirmSection(appointment)}`,
     footer: `
       <div class="left">
         ${can('planning.manage') ? `<button class="btn sm" data-action="edit-appointment" data-id="${appointment.id}">${icon('edit')} Bearbeiten</button>
@@ -2039,6 +2087,66 @@ async function openAppointment(appointmentId, orderId) {
       </div>
       <button class="btn" data-action="close-modal">Schließen</button>`,
   });
+}
+
+const appointmentLink = (appointment) =>
+  appointment?.confirm_token ? `${location.origin}/termin/${appointment.confirm_token}` : '';
+
+function confirmStatusBadge(appointment) {
+  if (appointment.confirmed_at) return '<span class="badge erledigt">bestätigt</span>';
+  if (appointment.declined_at) return '<span class="badge storniert">abgelehnt</span>';
+  return '<span class="badge neu">offen</span>';
+}
+
+function appointmentConfirmSection(appointment) {
+  const link = appointmentLink(appointment);
+  const manage = can('planning.manage');
+  let statusText = 'Der Kunde hat den Termin noch nicht bestätigt.';
+  if (appointment.confirmed_at) {
+    statusText = `Vom Kunden bestätigt am ${fmtDateTime(appointment.confirmed_at)}.`;
+  } else if (appointment.declined_at) {
+    statusText = `Vom Kunden abgelehnt am ${fmtDateTime(appointment.declined_at)}${appointment.customer_reply ? `: „${esc(appointment.customer_reply)}“` : '.'}`;
+  }
+
+  if (!link) {
+    return `<div class="subcard">
+      <h4 style="display:flex;align-items:center">Terminbestätigung ${confirmStatusBadge(appointment)}</h4>
+      <div class="small muted">Noch kein Bestätigungslink erzeugt.</div>
+      ${manage ? `<div style="margin-top:10px">
+        <button class="btn sm" data-action="appointment-link" data-id="${appointment.id}">${icon('send')} Bestätigungslink erzeugen</button>
+      </div>` : ''}
+    </div>`;
+  }
+
+  return `<div class="subcard">
+    <h4 style="display:flex;align-items:center">Terminbestätigung ${confirmStatusBadge(appointment)}</h4>
+    <div class="link-box">
+      <input id="confirm-link" type="text" readonly value="${esc(link)}" aria-label="Bestätigungslink" />
+      <button class="btn sm" data-action="appointment-copy" data-id="${appointment.id}">${icon('file')} Kopieren</button>
+    </div>
+    <div class="small muted" style="margin-top:8px">${statusText}</div>
+    ${manage ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn sm" data-action="appointment-mail" data-id="${appointment.id}">${icon('mail')} Per E-Mail senden</button>
+      <button class="btn sm" data-action="appointment-reset" data-id="${appointment.id}">${icon('refresh')} Zurücksetzen</button>
+    </div>` : ''}
+  </div>`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch { /* Fallback unten */ }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  area.remove();
+  return ok;
 }
 
 /* ------------------------------------------------------------------ Zeiterfassung */
@@ -2639,13 +2747,13 @@ function speak(text) {
   } catch { /* stumm */ }
 }
 
-function listenInline(textarea, statusEl) {
+function listenInline(textarea, statusEl, label = 'Bericht') {
   const recognition = startVoiceRecognition('report');
   if (!recognition) {
     if (statusEl) statusEl.textContent = 'Spracherkennung nicht verfügbar – bitte Text eingeben.';
     return;
   }
-  if (statusEl) statusEl.textContent = 'Ich höre … Bericht sprechen.';
+  if (statusEl) statusEl.textContent = `Ich höre … ${label} sprechen.`;
   let finalText = '';
   recognition.onresult = (event) => {
     let interim = '';
@@ -3418,6 +3526,65 @@ const ACTIONS = {
       toast('Termin gelöscht.');
       closeModal();
       refresh();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'appointment-link': async (id) => {
+    try {
+      const result = await api.post(`/api/appointments/${id}/confirm-link`);
+      const copied = await copyText(`${location.origin}${result.path}`);
+      toast(copied ? 'Bestätigungslink erzeugt und kopiert.' : 'Bestätigungslink erzeugt.');
+      await openAppointment(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'appointment-copy': async () => {
+    const link = appointmentLink(state.currentAppointment);
+    if (!link) return;
+    const copied = await copyText(link);
+    toast(copied ? 'Link kopiert.' : 'Bitte den Link manuell markieren und kopieren.', copied ? 'success' : 'info');
+  },
+  'appointment-mail': async () => {
+    const appointment = state.currentAppointment;
+    const link = appointmentLink(appointment);
+    if (!link) return;
+    let email = '';
+    if (appointment?.customer_id) {
+      try {
+        email = (await api.get(`/api/customers/${appointment.customer_id}`)).customer.email || '';
+      } catch { email = ''; }
+    }
+    const subject = `Termin am ${fmtDate(appointment.start_at)} um ${fmtTime(appointment.start_at)} Uhr`;
+    const lines = [
+      'Guten Tag,',
+      '',
+      'bitte bestätigen Sie kurz unseren Termin:',
+      `${fmtDate(appointment.start_at)}, ${fmtTime(appointment.start_at)}–${fmtTime(appointment.end_at)} Uhr`,
+    ];
+    if (appointment.title) lines.push(`Leistung: ${appointment.title}`);
+    lines.push('', 'Zum Bestätigen einfach diesen Link öffnen:', link, '', 'Vielen Dank!');
+    if (state.settings?.company_name) lines.push(state.settings.company_name);
+    location.href = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join('\n'))}`;
+  },
+  'appointment-reset': async (id) => {
+    if (!confirm('Bestätigung bzw. Ablehnung zurücksetzen? Der Link bleibt gültig.')) return;
+    try {
+      await api.post(`/api/appointments/${id}/confirm-reset`);
+      toast('Bestätigung zurückgesetzt.');
+      await openAppointment(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'delete-customer-note': async (id, el) => {
+    const customerId = Number(el.dataset.customer);
+    if (!confirm('Notiz löschen?')) return;
+    try {
+      await api.del(`/api/customers/${customerId}/notes/${id}`);
+      toast('Notiz gelöscht.');
+      await openCustomer(customerId);
     } catch (error) {
       toast(error.message, 'error');
     }

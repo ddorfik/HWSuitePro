@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import {
   db, getSettings, setSettings, logActivity, todayISO, addDays, round2,
 } from './db.js';
@@ -40,6 +41,14 @@ const num = (value, fallback = 0) => {
 const str = (value) => (value == null ? '' : String(value).trim());
 const bool = (value) => (value === true || value === 1 || value === '1' || value === 'true' ? 1 : 0);
 const search = (value) => `%${str(value)}%`;
+
+/** ISO-Zeitpunkt als deutsche Kurzform, z. B. „20.11.2026, 08:00". */
+const deDateTime = (value) => {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? str(value)
+    : date.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Berlin' });
+};
 
 function pick(body, fields) {
   const out = {};
@@ -117,6 +126,83 @@ function assertPhotoAccess(user, photo) {
   if (can(user, 'photos.manage')) return;
   if (user.employee_id != null && photo.employee_id === user.employee_id) return;
   assertOrderAccess(user, photo.order_id);
+}
+
+function assertCustomerAccess(user, customerId) {
+  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(customerId);
+  if (!customer) throw new HttpError(404, 'Kunde nicht gefunden');
+  if (!hasAllOrders(user)) {
+    const own = db.prepare(
+      `SELECT 1 FROM orders o WHERE o.customer_id = ? AND ${ownOrderClause('o')}`
+    ).get(customerId, ownEmployeeId(user), ownEmployeeId(user));
+    if (!own) throw new HttpError(403, 'Dieser Kunde gehört nicht zu deinen Aufträgen');
+  }
+  return customer;
+}
+
+function customerNoteList(customerId) {
+  return db.prepare(
+    `SELECT n.id, n.customer_id, n.text, n.created_at, n.user_id,
+       COALESCE(u.name, 'Unbekannt') AS user_name
+     FROM customer_notes n
+     LEFT JOIN users u ON u.id = n.user_id
+     WHERE n.customer_id = ?
+     ORDER BY n.created_at DESC, n.id DESC`
+  ).all(customerId);
+}
+
+/* Terminbestätigung: Der Kunde bekommt einen Link mit zufälligem Token. */
+const CONFIRM_TOKEN = /^[a-f0-9]{48}$/;
+
+function appointmentByToken(token) {
+  const value = str(token).toLowerCase();
+  if (!CONFIRM_TOKEN.test(value)) throw new HttpError(404, 'Dieser Link ist ungültig');
+  const row = db.prepare(
+    `SELECT a.*, o.number AS order_number, o.title AS order_title, o.customer_id, o.property_id,
+       e.name AS employee_name,
+       c.salutation, c.company, c.first_name, c.last_name, c.street, c.zip, c.city,
+       p.label AS property_label, p.street AS property_street, p.zip AS property_zip, p.city AS property_city
+     FROM appointments a
+     LEFT JOIN orders o ON o.id = a.order_id
+     LEFT JOIN employees e ON e.id = a.employee_id
+     LEFT JOIN customers c ON c.id = o.customer_id
+     LEFT JOIN properties p ON p.id = o.property_id
+     WHERE a.confirm_token = ?`
+  ).get(value);
+  if (!row) throw new HttpError(404, 'Dieser Link ist ungültig oder abgelaufen');
+  return row;
+}
+
+/** Öffentliche Sicht auf einen Termin – nur das, was der Kunde sehen darf. */
+function publicAppointment(row) {
+  const settings = getSettings();
+  const name = [row.first_name, row.last_name].filter(Boolean).join(' ').trim();
+  const customerName = name || str(row.company) || '';
+  return {
+    appointment: {
+      title: row.title,
+      start_at: row.start_at,
+      end_at: row.end_at,
+      confirmed_at: row.confirmed_at || null,
+      declined_at: row.declined_at || null,
+      customer_reply: row.customer_reply || '',
+    },
+    order: row.order_number ? { number: row.order_number, title: row.order_title } : null,
+    customer: { name: customerName, salutation: str(row.salutation) },
+    address: {
+      label: str(row.property_label),
+      street: str(row.property_street || row.street),
+      zip: str(row.property_zip || row.zip),
+      city: str(row.property_city || row.city),
+    },
+    employee: { name: str(row.employee_name) },
+    company: {
+      name: settings.company_name,
+      phone: settings.company_phone,
+      email: settings.company_email,
+      city: settings.company_city,
+    },
+  };
 }
 
 function sanitizeEmployee(row) {
@@ -605,8 +691,41 @@ route('GET', '/api/customers/:id', (req, res, params) => {
   const invoices = can(req.user, 'invoices.view')
     ? db.prepare('SELECT * FROM invoices WHERE customer_id = ? ORDER BY date DESC').all(params.id)
     : [];
-  return { customer: sanitizeCustomer(customer, req.user), properties, orders, invoices };
+  return {
+    customer: sanitizeCustomer(customer, req.user),
+    properties,
+    orders,
+    invoices,
+    notes: customerNoteList(customer.id),
+  };
 }, { permission: 'customers.view' });
+
+// ----------------------------------------------------------------- Kunden-Notizen
+route('GET', '/api/customers/:id/notes', (req, res, params) => {
+  const customer = assertCustomerAccess(req.user, params.id);
+  return customerNoteList(customer.id);
+}, { permission: 'customers.view' });
+
+route('POST', '/api/customers/:id/notes', (req, res, params) => {
+  const customer = assertCustomerAccess(req.user, params.id);
+  const text = str(req.body?.text);
+  if (!text) throw new HttpError(400, 'Bitte eine Notiz eingeben');
+  if (text.length > 4000) throw new HttpError(400, 'Notiz ist zu lang (maximal 4000 Zeichen)');
+  insertRow('customer_notes', {
+    customer_id: customer.id,
+    user_id: req.user.id,
+    text,
+  });
+  logActivity('kunde', `Notiz zu ${customer.company || `${customer.first_name} ${customer.last_name}`.trim()} hinzugefügt.`);
+  return { notes: customerNoteList(customer.id) };
+}, { permission: 'customers.manage' });
+
+route('DELETE', '/api/customers/:id/notes/:noteId', (req, res, params) => {
+  const customer = assertCustomerAccess(req.user, params.id);
+  db.prepare('DELETE FROM customer_notes WHERE id = ? AND customer_id = ?')
+    .run(num(params.noteId), customer.id);
+  return { notes: customerNoteList(customer.id) };
+}, { permission: 'customers.manage' });
 
 route('POST', '/api/customers', (req) => {
   const body = req.body ?? {};
@@ -1205,6 +1324,50 @@ route('DELETE', '/api/appointments/:id', (req, res, params) => {
   db.prepare('DELETE FROM appointments WHERE id = ?').run(params.id);
   return { ok: true };
 }, { permission: 'planning.manage' });
+
+// ----------------------------------------------------------------- Terminbestätigung
+route('POST', '/api/appointments/:id/confirm-link', (req, res, params) => {
+  const appointment = db.prepare('SELECT * FROM appointments WHERE id = ?').get(num(params.id));
+  if (!appointment) throw new HttpError(404, 'Termin nicht gefunden');
+  let token = appointment.confirm_token;
+  if (!token) {
+    token = randomBytes(24).toString('hex');
+    db.prepare('UPDATE appointments SET confirm_token = ? WHERE id = ?').run(token, appointment.id);
+  }
+  return { token, path: `/termin/${token}` };
+}, { permission: 'planning.manage' });
+
+route('POST', '/api/appointments/:id/confirm-reset', (req, res, params) => {
+  const appointment = db.prepare('SELECT * FROM appointments WHERE id = ?').get(num(params.id));
+  if (!appointment) throw new HttpError(404, 'Termin nicht gefunden');
+  db.prepare(`UPDATE appointments
+    SET confirmed_at = NULL, declined_at = NULL, customer_reply = NULL WHERE id = ?`).run(appointment.id);
+  return { ok: true };
+}, { permission: 'planning.manage' });
+
+// Öffentlich: Der Kunde öffnet den Link ohne Anmeldung.
+route('GET', '/api/public/appointments/:token', (req, res, params) => {
+  return publicAppointment(appointmentByToken(params.token));
+}, { public: true });
+
+route('POST', '/api/public/appointments/:token/confirm', (req, res, params) => {
+  const appointment = appointmentByToken(params.token);
+  db.prepare(`UPDATE appointments
+    SET confirmed_at = datetime('now'), declined_at = NULL, customer_reply = NULL
+    WHERE id = ?`).run(appointment.id);
+  logActivity('termin', `Kunde hat den Termin am ${deDateTime(appointment.start_at)} bestätigt.`);
+  return publicAppointment(appointmentByToken(params.token));
+}, { public: true });
+
+route('POST', '/api/public/appointments/:token/decline', (req, res, params) => {
+  const appointment = appointmentByToken(params.token);
+  const reply = str(req.body?.message).slice(0, 500);
+  db.prepare(`UPDATE appointments
+    SET declined_at = datetime('now'), confirmed_at = NULL, customer_reply = ?
+    WHERE id = ?`).run(reply, appointment.id);
+  logActivity('termin', `Kunde kann den Termin am ${deDateTime(appointment.start_at)} nicht wahrnehmen${reply ? `: „${reply}“` : ''}.`);
+  return publicAppointment(appointmentByToken(params.token));
+}, { public: true });
 
 // ----------------------------------------------------------------- Rechnungen
 route('GET', '/api/invoices', (req, res, params, url) => {

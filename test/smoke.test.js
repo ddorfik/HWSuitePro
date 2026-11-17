@@ -361,6 +361,96 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     assert.equal((await call(buero.cookie, '/api/photos')).status, 200);
     assert.equal((await call(hr.cookie, '/api/photos')).status, 403);
 
+    // ---------------------------------------------------------- Kundennotizen
+    const noteCustomer = customers[0].id;
+    const noteResult = await json(await call(chef.cookie, `/api/customers/${noteCustomer}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'Schlüssel liegt beim Nachbarn.' }),
+    }));
+    assert.equal(noteResult.notes.length, 1);
+    assert.match(noteResult.notes[0].text, /Nachbarn/);
+    assert.ok(noteResult.notes[0].user_name, 'Autor wird mitgeliefert');
+
+    const withNotes = await json(await call(chef.cookie, `/api/customers/${noteCustomer}`));
+    assert.equal(withNotes.notes.length, 1, 'Notizen kommen mit den Kundendetails');
+
+    const ownCustomer = ownOrder.customer_id;
+    assert.equal((await call(monteur.cookie, `/api/customers/${ownCustomer}/notes`)).status, 200, 'Monteur liest Notizen eigener Kunden');
+    assert.equal((await call(monteur.cookie, `/api/customers/${ownCustomer}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'Nicht erlaubt' }),
+    })).status, 403, 'Monteur darf keine Notizen anlegen');
+    assert.equal((await call(chef.cookie, `/api/customers/${noteCustomer}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: '   ' }),
+    })).status, 400, 'Leere Notiz wird abgelehnt');
+
+    const afterDelete = await json(await call(chef.cookie, `/api/customers/${noteCustomer}/notes/${noteResult.notes[0].id}`, { method: 'DELETE' }));
+    assert.equal(afterDelete.notes.length, 0);
+
+    // ---------------------------------------------------------- Terminbestätigung
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const appointment = await json(await call(chef.cookie, '/api/appointments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        order_id: target.id,
+        employee_id: 1,
+        title: 'Wartung Gastherme',
+        start_at: new Date(tomorrow.setHours(9, 0, 0, 0)).toISOString(),
+        end_at: new Date(tomorrow.setHours(11, 0, 0, 0)).toISOString(),
+      }),
+    }));
+    assert.ok(appointment.id);
+    assert.equal((await call(monteur.cookie, `/api/appointments/${appointment.id}/confirm-link`, { method: 'POST' })).status, 403,
+      'Nur Planung darf Bestätigungslinks erzeugen');
+
+    const link = await json(await call(chef.cookie, `/api/appointments/${appointment.id}/confirm-link`, { method: 'POST' }));
+    assert.match(link.path, /^\/termin\/[a-f0-9]{48}$/);
+    const token = link.path.split('/').pop();
+    const sameLink = await json(await call(chef.cookie, `/api/appointments/${appointment.id}/confirm-link`, { method: 'POST' }));
+    assert.equal(sameLink.token, token, 'Link bleibt stabil');
+
+    const page = await fetch(`${base}/termin/${token}`);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type'), /text\/html/);
+
+    const publicView = await fetch(`${base}/api/public/appointments/${token}`);
+    assert.equal(publicView.status, 200, 'Öffentlicher Link funktioniert ohne Anmeldung');
+    const publicData = await publicView.json();
+    assert.equal(publicData.appointment.confirmed_at, null);
+    assert.equal(publicData.appointment.title, 'Wartung Gastherme');
+    assert.ok(publicData.company.name);
+    assert.equal(publicData.order.number, target.number);
+    assert.equal((await fetch(`${base}/api/public/appointments/${'0'.repeat(48)}`)).status, 404, 'Unbekannter Token ist ungültig');
+
+    const confirmed = await json(await fetch(`${base}/api/public/appointments/${token}/confirm`, { method: 'POST' }));
+    assert.ok(confirmed.appointment.confirmed_at, 'Kunde bestätigt den Termin');
+    assert.equal(confirmed.appointment.declined_at, null);
+
+    const internal = await json(await call(chef.cookie, '/api/appointments'));
+    const saved = internal.find((row) => row.id === appointment.id);
+    assert.ok(saved.confirmed_at, 'Bestätigung ist intern sichtbar');
+
+    const declined = await json(await fetch(`${base}/api/public/appointments/${token}/decline`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'Bitte nachmittags' }),
+    }));
+    assert.equal(declined.appointment.confirmed_at, null);
+    assert.ok(declined.appointment.declined_at);
+    assert.equal(declined.appointment.customer_reply, 'Bitte nachmittags');
+
+    const reset = await call(chef.cookie, `/api/appointments/${appointment.id}/confirm-reset`, { method: 'POST' });
+    assert.equal(reset.status, 200);
+    const resetView = await json(await fetch(`${base}/api/public/appointments/${token}`));
+    assert.equal(resetView.appointment.confirmed_at, null);
+    assert.equal(resetView.appointment.declined_at, null);
+    assert.equal(resetView.appointment.customer_reply, '');
+
     // ---------------------------------------------------------- Abmelden
     await call(chef.cookie, '/api/auth/logout', { method: 'POST' });
     assert.equal((await call(chef.cookie, '/api/dashboard')).status, 401);

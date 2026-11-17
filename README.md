@@ -175,6 +175,8 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 ### Kunden & Objekte
 
 - Firmen- und Privatkunden mit Ansprechpartner, Anrede, Kontaktdaten und Notizen
+- **Kundennotizen** als Verlauf: jeder Eintrag mit Autor und Zeitstempel, direkt in der Kundenakte
+  erfassbar – auch per Sprachdiktat
 - Mehrere Objekte pro Kunde (z. B. Gas-/Wasseranschluss, Heizungsart, Zählernummer)
 - Kundenakte mit Objekten, Aufträgen, Rechnungen und offenen Beträgen
 
@@ -183,6 +185,16 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 - Wochenkalender mit allen Terminen, farblich je Monteur
 - Termine per Klick in freie Zeitfenster anlegen
 - Monteure sehen nur ihre eigenen Termine
+- **Terminbestätigung per Link**: Ein Klick erzeugt einen persönlichen Link
+  (`/termin/<token>`), den der Kunde ohne Anmeldung öffnen kann. Er bestätigt den Termin oder
+  meldet zurück, dass er nicht passt – optional mit Wunsch oder Begründung. Der Status
+  (offen / bestätigt / abgelehnt) ist im Kalender und im Termin sichtbar; der Link lässt sich
+  direkt per E-Mail-Programm versenden.
+
+  Der Link enthält einen zufälligen Token (48 Hex-Zeichen) und gilt nur für diesen einen Termin.
+  Er ersetzt keine Termineinladung per Post – bitte nur an den Kunden selbst weitergeben.
+  E-Mails werden **nicht** automatisch versendet: der E-Mail-Button öffnet das lokale
+  Mailprogramm mit fertigem Text, damit kein SMTP-Zugang nötig ist.
 
 ### Material & Lager
 
@@ -276,6 +288,7 @@ GasWasserPro/
 │   ├── icon-192.png        App-Icon für PWA/Android
 │   ├── icon-512.png
 │   ├── apple-touch-icon.png
+│   ├── termin.html         Öffentliche Terminbestätigung für Kunden (/termin/<token>)
 │   └── sw.js               Service Worker
 ├── test/smoke.test.js      Tests
 ├── scripts/reset.js        Demo-Daten zurücksetzen
@@ -328,6 +341,19 @@ POST   /api/invoices/:id/dunning      Mahnung erzeugen
 GET    /api/invoices/:id/pdf          Rechnung als PDF (?mahnung=1 für Mahnung)
 
 GET    /api/customers                 Kunden inkl. Kennzahlen
+GET    /api/customers/:id             Kunde inkl. Objekten, Aufträgen, Rechnungen und Notizen
+GET    /api/customers/:id/notes       Kundennotizen (Autor + Zeitstempel)
+POST   /api/customers/:id/notes       Notiz anlegen (Büro/Chef)
+DELETE /api/customers/:id/notes/:id   Notiz löschen (Büro/Chef)
+
+GET    /api/appointments              Termine (Filter: from, to)
+POST   /api/appointments              Termin anlegen
+POST   /api/appointments/:id/confirm-link   Bestätigungslink erzeugen (stabil)
+POST   /api/appointments/:id/confirm-reset  Bestätigung zurücksetzen
+GET    /api/public/appointments/:token      Öffentlich: Termin für den Kunden
+POST   /api/public/appointments/:token/confirm   Kunde bestätigt
+POST   /api/public/appointments/:token/decline   Kunde lehnt ab (mit Nachricht)
+
 GET    /api/articles                  Lager
 POST   /api/articles/:id/stock        Lagerbuchung
 GET    /api/contracts                 Wartungsverträge
