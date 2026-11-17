@@ -857,3 +857,7 @@ body.logged-out { background: radial-gradient(1200px 600px at 10% 0%, #14434f 0%
 .event .e-flag.no { color: #b91c1c; }
 .ok-text { color: var(--ok); font-weight: 600; }
 .no-text { color: var(--danger); font-weight: 600; }
+
+/* Terminzeile im Auftrag: öffnet den Termin inkl. Bestätigung */
+.appt-row { padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.appt-row:hover { background: var(--surface-2); }

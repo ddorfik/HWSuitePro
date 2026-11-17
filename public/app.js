@@ -986,7 +986,12 @@ async function openOrder(orderId) {
     ${appointments.length ? `
       <div class="subcard">
         <h4>Termine</h4>
-        ${appointments.map((a) => `<div class="small" style="padding:3px 0">${icon('calendar')} ${fmtDate(a.start_at)}, ${fmtTime(a.start_at)}–${fmtTime(a.end_at)} Uhr · ${esc(a.title)}</div>`).join('')}
+        ${appointments.map((a) => `<div class="small appt-row" data-action="open-appointment" data-id="${a.id}" title="Termin öffnen">
+          ${icon('calendar')} ${fmtDate(a.start_at)}, ${fmtTime(a.start_at)}–${fmtTime(a.end_at)} Uhr · ${esc(a.title)}
+          ${a.confirmed_at ? '<span class="badge erledigt" style="margin-left:6px">bestätigt</span>'
+            : a.declined_at ? '<span class="badge storniert" style="margin-left:6px">abgelehnt</span>' : ''}
+          <span class="muted" style="margin-left:4px">${icon('arrow')}</span>
+        </div>`).join('')}
       </div>` : ''}
 
     ${invoice && canMoney ? `
@@ -2114,7 +2119,7 @@ function appointmentConfirmSection(appointment) {
       <div class="small muted">Noch kein Bestätigungslink erzeugt.</div>
       ${manage ? `<div style="margin-top:10px">
         <button class="btn sm" data-action="appointment-link" data-id="${appointment.id}">${icon('send')} Bestätigungslink erzeugen</button>
-      </div>` : ''}
+      </div>` : `<div class="small muted" style="margin-top:6px">Links können Büro, Vorgesetzte und Chef erzeugen.</div>`}
     </div>`;
   }
 
