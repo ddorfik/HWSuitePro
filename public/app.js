@@ -217,18 +217,18 @@ function toast(message, type = 'success') {
   }, type === 'error' ? 6000 : 3800);
 }
 
-function openModal({ title, subtitle = '', body, footer = '', size = '' }) {
+function openModal({ title, subtitle = '', body, footer = '', size = '', dismissible = true }) {
   $('#modal-root').innerHTML = `
-    <div class="modal-overlay" data-overlay>
+    <div class="modal-overlay" data-overlay data-dismissible="${dismissible ? 'true' : 'false'}">
       <div class="modal ${size}" role="dialog" aria-modal="true">
         <div class="modal-head">
           <div>
             <h2>${esc(title)}</h2>
             ${subtitle ? `<div class="m-sub">${esc(subtitle)}</div>` : ''}
           </div>
-          <button class="icon-btn m-close" type="button" data-action="close-modal" aria-label="Schließen">
+          ${dismissible ? `<button class="icon-btn m-close" type="button" data-action="close-modal" aria-label="Schließen">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg>
-          </button>
+          </button>` : ''}
         </div>
         <div class="modal-body">${body}</div>
         ${footer ? `<div class="modal-foot">${footer}</div>` : ''}
@@ -236,9 +236,11 @@ function openModal({ title, subtitle = '', body, footer = '', size = '' }) {
     </div>`;
   document.body.style.overflow = 'hidden';
   const overlay = $('[data-overlay]');
-  overlay.addEventListener('mousedown', (event) => {
-    if (event.target === overlay) closeModal();
-  });
+  if (dismissible) {
+    overlay.addEventListener('mousedown', (event) => {
+      if (event.target === overlay) closeModal();
+    });
+  }
 }
 
 function closeModal() {
@@ -246,7 +248,7 @@ function closeModal() {
   document.body.style.overflow = '';
 }
 
-function formModal({ title, subtitle, fields, values = {}, submitLabel = 'Speichern', onSubmit, size = '' }) {
+function formModal({ title, subtitle, fields, values = {}, submitLabel = 'Speichern', onSubmit, size = '', dismissible = true }) {
   const html = fields.map((field, index) => {
     let out = '';
     if (field.section && (index === 0 || fields[index - 1]?.section !== field.section)) {
@@ -289,9 +291,10 @@ function formModal({ title, subtitle, fields, values = {}, submitLabel = 'Speich
     title,
     subtitle,
     size: size || 'wide',
+    dismissible,
     body: `<form id="modal-form" class="form-grid" novalidate>${html}</form>`,
     footer: `
-      <button class="btn" type="button" data-action="close-modal">Abbrechen</button>
+      ${dismissible ? '<button class="btn" type="button" data-action="close-modal">Abbrechen</button>' : ''}
       <button class="btn primary" type="submit" form="modal-form">${esc(submitLabel)}</button>`,
   });
 
@@ -365,6 +368,10 @@ const PAGE_GUARDS = {
 let primaryAction = null;
 
 async function navigate() {
+  if (state.user?.must_change_password) {
+    openPasswordChange({ mandatory: true });
+    return;
+  }
   closeModal();
   const raw = location.hash.replace(/^#\/?/, '');
   let page = raw.split('?')[0] || 'dashboard';
@@ -3406,7 +3413,10 @@ function uploadPhoto(orderId, kind = 'sonstiges', reportId = null, { multiple = 
 
 /* ------------------------------------------------------------------ Einstellungen */
 async function renderSettings() {
-  const { settings } = await api.get('/api/settings');
+  const { settings, security = {} } = await api.get('/api/settings');
+  const demoAccounts = security.demo_accounts || [];
+  const insecureNetwork = security.https === false
+    && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
 
   const input = (name, label, opts = {}) => `
     <div class="field ${opts.full ? 'full' : ''}">
@@ -3540,6 +3550,28 @@ async function renderSettings() {
           <div class="small muted" style="margin-top:6px">Einstellungen zuerst speichern – der Test nutzt die gespeicherten Werte.</div>
         </div>
 
+        <div class="card form-card">
+          <h2>Sicherheit</h2>
+          <div class="fc-sub">Zugänge und Daten schützen.</div>
+          <div class="toggle-row">
+            <div class="tr-main">
+              <div class="tr-title">Demo-Zugänge anzeigen</div>
+              <div class="tr-sub">Blendet die Testkonten auf der Anmeldeseite aus. Die Passwörter der Demo-Konten bleiben davon unberührt und müssen zusätzlich geändert werden.</div>
+            </div>
+            <label class="switch"><input type="checkbox" name="demo_mode" ${settings.demo_mode === '1' ? 'checked' : ''} /><span></span></label>
+          </div>
+          <div class="hr"></div>
+          ${insecureNetwork ? `<div class="small" style="color:#b45309;margin-bottom:8px"><b>Unverschlüsselte Verbindung:</b> Diese Seite läuft über HTTP. Passwörter und Kundendaten sind im Netzwerk lesbar – bitte HTTPS einrichten.</div>` : ''}
+          ${demoAccounts.length ? `<div class="small" style="color:#b91c1c;margin-bottom:8px"><b>Startpasswörter aktiv:</b> ${demoAccounts.map((name) => esc(name)).join(', ')}. Bitte unter „Benutzer &amp; Rechte“ ändern.</div>` : ''}
+          ${security.must_change ? `<div class="small muted" style="margin-bottom:8px">${security.must_change} Konto/Konten müssen sich beim nächsten Login ein neues Passwort setzen.</div>` : ''}
+          <div class="small muted" style="line-height:1.6">
+            <b>Vor dem Produktivbetrieb:</b><br />
+            · Alle Startpasswörter unter „Benutzer &amp; Rechte“ ändern.<br />
+            · App nur über HTTPS betreiben (sonst sind Passwörter im Netz lesbar).<br />
+            · Regelmäßig <code>data/</code> sichern – dort liegen Datenbank und Fotos.
+          </div>
+        </div>
+
         <div class="card form-card full">
           <h2>Team & Monteure</h2>
           <div class="fc-sub">Wer ist im Einsatz? Stundensätze werden bei neuen Aufträgen vorbelegt.</div>
@@ -3626,6 +3658,34 @@ function employeeForm(employee = null) {
 }
 
 /* ------------------------------------------------------------------ Aktionen */
+function openPasswordChange({ mandatory = false } = {}) {
+  formModal({
+    title: mandatory ? 'Neues Passwort festlegen' : 'Passwort ändern',
+    subtitle: mandatory
+      ? 'Dieses Konto verwendet noch ein Startpasswort. Bitte vergib jetzt ein eigenes Passwort.'
+      : '',
+    dismissible: !mandatory,
+    fields: [
+      { name: 'currentPassword', label: 'Aktuelles Passwort', type: 'password', required: true },
+      { name: 'newPassword', label: 'Neues Passwort', type: 'password', required: true, hint: 'Mindestens 8 Zeichen' },
+      { name: 'confirm', label: 'Neues Passwort wiederholen', type: 'password', required: true },
+    ],
+    submitLabel: mandatory ? 'Passwort speichern' : 'Passwort ändern',
+    onSubmit: async (values) => {
+      if (values.newPassword.length < 8) throw new Error('Das neue Passwort muss mindestens 8 Zeichen haben');
+      if (values.newPassword !== values.confirm) throw new Error('Die Passwörter stimmen nicht überein');
+      await api.post('/api/auth/password', values);
+      if (mandatory) {
+        toast('Passwort gespeichert.');
+        location.reload();
+        return;
+      }
+      closeModal();
+      toast('Passwort geändert. Andere Geräte müssen sich neu anmelden.');
+    },
+  });
+}
+
 const ACTIONS = {
   'toggle-nav': () => $('#sidebar').classList.toggle('open'),
   'close-modal': () => closeModal(),
@@ -4043,24 +4103,7 @@ const ACTIONS = {
       toast(error.message, 'error');
     }
   },
-  'change-password': () => {
-    formModal({
-      title: 'Passwort ändern',
-      fields: [
-        { name: 'currentPassword', label: 'Aktuelles Passwort', type: 'password', required: true },
-        { name: 'newPassword', label: 'Neues Passwort', type: 'password', required: true, hint: 'Mindestens 8 Zeichen' },
-        { name: 'confirm', label: 'Neues Passwort wiederholen', type: 'password', required: true },
-      ],
-      submitLabel: 'Passwort ändern',
-      onSubmit: async (values) => {
-        if (values.newPassword.length < 8) throw new Error('Das neue Passwort muss mindestens 8 Zeichen haben');
-        if (values.newPassword !== values.confirm) throw new Error('Die Passwörter stimmen nicht überein');
-        await api.post('/api/auth/password', values);
-        closeModal();
-        toast('Passwort geändert.');
-      },
-    });
-  },
+  'change-password': () => openPasswordChange(),
   logout: async () => {
     try { await api.post('/api/auth/logout'); } catch { /* stumm */ }
     state.user = null;
@@ -4099,7 +4142,10 @@ $('#global-search')?.addEventListener('input', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeModal();
+  if (event.key !== 'Escape') return;
+  const overlay = $('.modal-overlay');
+  if (overlay && overlay.dataset.dismissible === 'false') return;
+  closeModal();
 });
 
 window.addEventListener('hashchange', navigate);
@@ -4219,12 +4265,13 @@ function showLogin() {
   if (fab) fab.hidden = true;
   document.body.classList.add('logged-out');
   closeModal();
-  const demo = state.meta.demo_users || ['chef', 'buero', 'vorgesetzt', 'monteur', 'azubi', 'hr'];
-  const passwords = { chef: 'chef123', buero: 'buero123', vorgesetzt: 'vorgesetzt123', monteur: 'monteur123', azubi: 'azubi123', hr: 'hr123' };
+  const demo = state.meta.demo_users || [];
+  const passwords = state.meta.demo_passwords || {};
   const demoBox = $('#login-demo');
   if (demoBox) {
-    demoBox.innerHTML = `
-      <div class="small muted">Demo-Zugänge – zum Ausfüllen antippen:</div>
+    demoBox.hidden = demo.length === 0;
+    demoBox.innerHTML = demo.length === 0 ? '' : `
+      <div class="small muted">Demo-Zugänge – zum Ausfüllen antippen. Vor dem Produktivbetrieb Passwörter ändern:</div>
       <div class="demo-chips">
         ${demo.map((username) => `<button type="button" class="chip" data-demo-user="${esc(username)}">${esc(username)} <span class="muted">/ ${esc(passwords[username] || '')}</span></button>`).join('')}
       </div>`;
@@ -4270,6 +4317,10 @@ async function enterApp(data) {
   state.todayMinutes = data.todayMinutes ?? 0;
   state.weekMinutes = data.weekMinutes ?? 0;
   showApp();
+  if (data.user.must_change_password) {
+    openPasswordChange({ mandatory: true });
+    return;
+  }
   try {
     await loadBase();
   } catch (error) {

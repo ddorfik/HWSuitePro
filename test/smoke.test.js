@@ -185,15 +185,41 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
   }
   assert.ok(ready, 'Server ist erreichbar');
 
+  // Startpasswörter müssen beim ersten Login geändert werden – der Helfer merkt sich das neue.
+  const credentials = {};
   const login = async (username, password) => {
+    const current = credentials[username] || password;
     const response = await fetch(`${base}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password: current }),
     });
     assert.equal(response.status, 200, `Login ${username}`);
-    const cookie = response.headers.get('set-cookie').split(';')[0];
-    const data = await response.json();
+    let cookie = response.headers.get('set-cookie').split(';')[0];
+    let data = await response.json();
+
+    if (data.user.must_change_password) {
+      const blocked = await fetch(`${base}/api/dashboard`, { headers: { Cookie: cookie } });
+      assert.equal(blocked.status, 403, 'Startpasswort muss zuerst geändert werden');
+      assert.equal((await blocked.json()).code, 'password_change_required');
+
+      const nextPassword = `${current}-test`;
+      const changed = await fetch(`${base}/api/auth/password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ currentPassword: current, newPassword: nextPassword }),
+      });
+      assert.equal(changed.status, 200, `Passwortwechsel ${username}`);
+      const changedData = await changed.json();
+      assert.equal(changedData.user.must_change_password, false);
+
+      // Die alte Sitzung ist beendet, das neue Cookie gilt.
+      assert.equal((await fetch(`${base}/api/auth/me`, { headers: { Cookie: cookie } })).status, 401,
+        'Alte Sitzung ist nach dem Passwortwechsel ungültig');
+      cookie = changed.headers.get('set-cookie').split(';')[0];
+      data = changedData;
+      credentials[username] = nextPassword;
+    }
     return { cookie, data };
   };
   const call = (cookie, path, options = {}) => fetch(`${base}${path}`, {
@@ -275,6 +301,9 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     assert.ok(users.length >= 6);
 
     // ---------------------------------------------------------- Monteur
+    const sessionRows = db.prepare('SELECT id FROM sessions').all();
+    assert.ok(sessionRows.every((row) => /^[a-f0-9]{64}$/.test(row.id)), 'Sitzungstokens liegen nur gehasht vor');
+
     const monteur = await login('monteur', 'monteur123');
     assert.equal(monteur.data.user.role, 'monteur');
     assert.ok(monteur.data.user.permissions.includes('time.own'));
@@ -609,6 +638,56 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     assert.equal((await noMail.json()).code, 'mail_not_configured');
     assert.equal((await call(monteur.cookie, `/api/appointments/${appointment.id}/confirm-mail`, { method: 'POST' })).status, 403,
       'Nur Planung darf Bestätigungen versenden');
+
+    // ---------------------------------------------------------- Sicherheit
+    // Kaputte Pfade, Cookies und Host-Header dürfen den Server nicht beenden.
+    const rawRequest = (rawPath, extraHeaders = '', hostValue = '127.0.0.1') => new Promise((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1', () => {
+        socket.write(`GET ${rawPath} HTTP/1.1\r\nHost: ${hostValue}\r\n${extraHeaders}Connection: close\r\n\r\n`);
+      });
+      let data = '';
+      socket.on('data', (chunk) => { data += chunk.toString('utf8'); });
+      socket.on('end', () => resolve(data.split('\r\n')[0]));
+      socket.on('error', reject);
+      socket.setTimeout(4000, () => { socket.destroy(); resolve('timeout'); });
+    });
+    assert.match(await rawRequest('/api/customers/%'), /400/, 'Kaputte URL wird abgelehnt');
+    assert.match(await rawRequest('/api/auth/me', 'Cookie: hp_session=%\r\n'), /401/, 'Kaputtes Cookie wird abgelehnt');
+    assert.match(await rawRequest('/api/auth/meta', '', 'bad host'), /^HTTP\/1\.1 /, 'Ungültiger Host beendet den Server nicht');
+    const stillAlive = await fetch(`${base}/api/auth/meta`);
+    assert.equal(stillAlive.status, 200, 'Server läuft nach kaputten Anfragen weiter');
+
+    // Sicherheitsheader sind gesetzt
+    const home = await fetch(`${base}/`);
+    assert.match(home.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+    assert.equal(home.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(home.headers.get('x-frame-options'), 'DENY');
+    assert.equal(home.headers.get('referrer-policy'), 'no-referrer');
+
+    // Fremde Herkunft darf keine Änderungen auslösen (CSRF-Schutz).
+    const foreign = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
+      body: JSON.stringify({ username: 'chef', password: 'chef123' }),
+    });
+    assert.equal(foreign.status, 403);
+
+    // Einstellungen: keine SMTP- oder Bankdaten für Rollen ohne Recht.
+    const monteurAgain = await login('monteur', 'monteur123');
+    for (const key of ['smtp_host', 'smtp_user', 'smtp_password', 'smtp_from', 'iban', 'bic', 'public_url']) {
+      assert.equal(monteurAgain.data.settings[key], undefined, `${key} bleibt verborgen`);
+    }
+    assert.equal(monteurAgain.data.settings.company_email, 'info@moeller-gaswasser.de');
+
+    // CSV-Formeln werden entschärft (Schutz vor Tabellenkalkulations-Injection).
+    const csvCustomer = await json(await call(chef.cookie, '/api/customers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ company: '=cmd|/C calc!A0', last_name: 'Test' }),
+    }));
+    const exportedCsv = await (await call(chef.cookie, '/api/export/kunden.csv')).text();
+    assert.ok(exportedCsv.includes(`\"'=cmd|/C calc!A0\"`), 'Formel wird als Text exportiert');
+    await call(chef.cookie, `/api/customers/${csvCustomer.id}`, { method: 'DELETE' });
 
     // ---------------------------------------------------------- Abmelden
     await call(chef.cookie, '/api/auth/logout', { method: 'POST' });

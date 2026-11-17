@@ -35,6 +35,8 @@ npm run reset    # setzt data/ zurück (löscht lokale Daten!)
 
 Demo-Logins: `chef/chef123`, `vorgesetzt/vorgesetzt123`, `buero/buero123`,
 `monteur/monteur123`, `azubi/azubi123`, `hr/hr123`.
+Bei einer **neuen Datenbank** sind das Startpasswörter: Der erste Login erzwingt ein neues
+Passwort. Bestehende Datenbanken behalten ihre Passwörter (Sicherheitskarte zeigt schwache Konten).
 
 ## 3. Struktur
 
@@ -59,8 +61,10 @@ Demo-Logins: `chef/chef123`, `vorgesetzt/vorgesetzt123`, `buero/buero123`,
 ## 4. Unveränderliche Regeln
 
 1. **Rechte serverseitig prüfen.** Ausblenden in der UI ist nur Komfort. Jede Route bekommt
-   `{ permission: '…' }` oder `{ permissions: [ … ] }`; neue Rechte gehören in
-   `src/permissions.js` **und** in die Rechte-Matrix der README.
+   `{ permission: '…' }`, `{ permissions: [ … ] }`, `{ authenticated: true }` oder
+   `{ public: true }` – **ohne Angabe ist eine Route gesperrt**. Neue Rechte gehören in
+   `src/permissions.js` **und** in die Rechte-Matrix der README. Bei Datensätzen zusätzlich die
+   Zugehörigkeit prüfen (`assertOrderAccess`, `assertCustomerAccess`, eigene `employee_id`).
 2. **Keine Laufzeitabhängigkeiten.** Kein `express`, kein `bcrypt`, kein Build-Tool,
    kein CDN im Frontend – auch E-Mails laufen über den eigenen Client in `src/mail.js`.
    Das Projekt muss „Ordner kopieren, `npm start`, fertig" bleiben.
@@ -79,6 +83,15 @@ Demo-Logins: `chef/chef123`, `vorgesetzt/vorgesetzt123`, `buero/buero123`,
 7. **Sprachsteuerung nicht ausbremsen.** Sprachbefehle dürfen ein offenes Formular nicht
    „abbrechen" oder zum Tippen zwingen; Diktat schreibt in das aktive Feld.
 8. **Keine Secrets, keine echten Daten** in Code, Tests, Beispielen oder Commit-Messages.
+9. **Keine Geheimnisse in API-Antworten.** Einstellungen je Rolle über `settingsForUser(...)`
+   ausliefern; SMTP-Passwörter nur maskiert, Bankdaten nur mit `invoices.view`.
+10. **Eingaben escapen.** HTML nur über `esc(...)` (Frontend) bzw. `escHtml(...)` (E-Mail);
+   Attributwerte und Links mitdenken. Neue öffentliche Seiten brauchen dieselben Regeln.
+11. **Server bleibt erreichbar.** Anfragen dürfen nie zu einem unbehandelten Fehler führen:
+   URL/Cookies defensiv parsen, `decodeURIComponent` absichern, Größen begrenzen.
+12. **Sicherheitsheader nicht entfernen.** `CSP`, `X-Frame-Options`, `nosniff` und der
+   Origin-Schutz in `server.js` sind Pflicht. Inline-Skripte sind deshalb tabu – Skripte
+   gehören in eigene Dateien unter `public/`.
 
 ## 5. Rezept: neuer API-Endpunkt
 

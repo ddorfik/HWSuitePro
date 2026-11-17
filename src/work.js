@@ -1,5 +1,5 @@
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, normalize as normalizePath } from 'node:path';
+import { join, normalize as normalizePath, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { db, DATA_DIR } from './db.js';
 
@@ -193,7 +193,7 @@ export function savePhoto({ orderId, reportId = null, employeeId = null, dataUrl
 export function photoFile(photo) {
   const relative = normalizePath(photo.filename);
   const full = join(PHOTO_DIR, relative);
-  if (!full.startsWith(PHOTO_DIR)) return null;
+  if (!full.startsWith(`${PHOTO_DIR}${sep}`)) return null;
   return full;
 }
 

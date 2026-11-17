@@ -12,8 +12,9 @@ import { runAutomation } from './automation.js';
 import {
   authenticate, login, logout, changePassword, sessionCookie, clearSessionCookie,
   parseCookies, SESSION_COOKIE, checkLoginAllowed, registerLoginFailure, resetLoginFailures,
+  getUserById, issueSession, deleteUserSessions, isSecureRequest, clientIp, TRUST_PROXY,
 } from './auth.js';
-import { hashPassword } from './password.js';
+import { hashPassword, verifyPassword } from './password.js';
 import {
   can, canAny, permissionsFor, roleLabel, ROLES,
 } from './permissions.js';
@@ -45,19 +46,52 @@ const bool = (value) => (value === true || value === 1 || value === '1' || value
 const search = (value) => `%${str(value)}%`;
 
 /** Absolute Adresse für Links in E-Mails (optional über Einstellungen festgelegt). */
+const safeHostHeader = (value) => {
+  const host = String(value || '').split(',')[0].trim().toLowerCase();
+  return /^[a-z0-9.-]+(?::\d+)?$/.test(host) || /^\[[0-9a-f:]+\](?::\d+)?$/.test(host) ? host : '';
+};
+
 const publicBaseUrl = (req) => {
-  const configured = str(getSettings().public_url).replace(/\/+$/, '');
-  if (configured) return configured;
-  const forwardedHost = str(req.headers['x-forwarded-host']).split(',')[0].trim();
-  const host = forwardedHost || str(req.headers.host) || 'localhost';
-  const forwardedProto = str(req.headers['x-forwarded-proto']).split(',')[0].trim();
-  const proto = forwardedProto || (req.socket?.encrypted ? 'https' : 'http');
+  const configured = str(getSettings().public_url);
+  if (configured) {
+    try {
+      const url = new URL(configured);
+      if (['http:', 'https:'].includes(url.protocol) && !/[\r\n]/.test(configured)) {
+        return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+      }
+    } catch { /* ungültige Adresse ignorieren */ }
+  }
+  // Forwarded-Header nur hinter einem vertrauenswürdigen Proxy auswerten.
+  const forwardedHost = TRUST_PROXY ? safeHostHeader(req.headers['x-forwarded-host']) : '';
+  const host = forwardedHost || safeHostHeader(req.headers.host) || 'localhost';
+  const forwardedProto = TRUST_PROXY ? str(req.headers['x-forwarded-proto']).split(',')[0].trim().toLowerCase() : '';
+  const proto = forwardedProto === 'https' || req.socket?.encrypted ? 'https' : 'http';
   return `${proto}://${host}`;
 };
 
 const escHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[char]));
+
+const FINANCE_SETTINGS = ['tax_number', 'vat_id', 'register_court', 'register_number', 'bank_name', 'iban', 'bic', 'dunning_fee', 'default_labor_rate', 'default_tax_rate'];
+const MAIL_SETTINGS = ['smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_password', 'smtp_from', 'smtp_from_name', 'mail_notify_replies', 'public_url'];
+
+/**
+ * Einstellungen je Rolle: Bank- und SMTP-Zugangsdaten bleiben bei den Rollen,
+ * die sie benötigen. Das Passwort wird nie im Klartext ausgeliefert.
+ */
+function settingsForUser(settings, user) {
+  const visible = { ...settings };
+  if (!can(user, 'invoices.view')) {
+    for (const key of FINANCE_SETTINGS) delete visible[key];
+  }
+  if (!can(user, 'settings.manage')) {
+    for (const key of MAIL_SETTINGS) delete visible[key];
+  } else {
+    visible.smtp_password = visible.smtp_password ? '********' : '';
+  }
+  return visible;
+}
 
 /** ISO-Zeitpunkt als deutsche Kurzform, z. B. „20.11.2026, 08:00". */
 const deDateTime = (value) => {
@@ -166,6 +200,32 @@ function customerNoteList(customerId) {
      WHERE n.customer_id = ?
      ORDER BY n.created_at DESC, n.id DESC`
   ).all(customerId);
+}
+
+/* Einfache Bremse für öffentliche Endpunkte (pro IP und Zeitfenster). */
+const requestCounts = new Map();
+function rateLimit(ip, bucket, limit, windowMs) {
+  const now = Date.now();
+  const key = `${bucket}|${ip}`;
+  let entry = requestCounts.get(key);
+  if (!entry || entry.resetAt <= now) {
+    entry = { count: 0, resetAt: now + windowMs };
+    requestCounts.set(key, entry);
+  }
+  entry.count += 1;
+  if (requestCounts.size > 10000) {
+    for (const [entryKey, value] of requestCounts) {
+      if (value.resetAt <= now) requestCounts.delete(entryKey);
+    }
+  }
+  return entry.count <= limit;
+}
+
+function publicRateLimit(req, bucket, limit = 60, windowMs = 60_000) {
+  const ip = clientIp(req);
+  if (!rateLimit(ip, bucket, limit, windowMs)) {
+    throw new HttpError(429, 'Zu viele Anfragen – bitte kurz warten.');
+  }
 }
 
 /* Terminbestätigung: Der Kunde bekommt einen Link mit zufälligem Token. */
@@ -495,7 +555,7 @@ route('GET', '/api/my-day', (req) => {
     kpis,
     teamToday,
   };
-});
+}, { permission: 'dashboard.view' });
 
 function managementDashboard(user) {
   const showMoney = can(user, 'invoices.view');
@@ -720,8 +780,39 @@ function hrDashboard(user) {
 
 
 // ----------------------------------------------------------------- Anmeldung
+const DEMO_PASSWORDS = {
+  chef: 'chef123',
+  buero: 'buero123',
+  vorgesetzt: 'vorgesetzt123',
+  monteur: 'monteur123',
+  azubi: 'azubi123',
+  hr: 'hr123',
+};
+
+/**
+ * Konten, die noch das öffentlich bekannte Startpasswort verwenden.
+ * scrypt ist absichtlich teuer – das Ergebnis wird deshalb zwischengespeichert.
+ */
+let demoAccountCache = null;
+function demoAccountsWithDefaultPassword() {
+  if (demoAccountCache) return demoAccountCache;
+  const found = [];
+  for (const [username, password] of Object.entries(DEMO_PASSWORDS)) {
+    const row = db.prepare(
+      'SELECT username, password_hash FROM users WHERE lower(username) = lower(?) AND active = 1'
+    ).get(username);
+    if (row && verifyPassword(password, row.password_hash)) found.push(row.username);
+  }
+  demoAccountCache = found;
+  return found;
+}
+
+function invalidateDemoAccountCache() {
+  demoAccountCache = null;
+}
+
 route('POST', '/api/auth/login', (req, res) => {
-  const ip = String(req.socket?.remoteAddress || 'unknown');
+  const ip = clientIp(req);
   if (!checkLoginAllowed(ip)) {
     throw new HttpError(429, 'Zu viele Fehlversuche – bitte in einigen Minuten erneut versuchen.');
   }
@@ -735,7 +826,7 @@ route('POST', '/api/auth/login', (req, res) => {
   const running = runningTime(result.user);
   return {
     user: result.user,
-    settings: getSettings(),
+    settings: settingsForUser(getSettings(), result.user),
     time: running ? decorateTime(running) : null,
   };
 }, { public: true });
@@ -744,58 +835,67 @@ route('POST', '/api/auth/logout', (req, res) => {
   logout(parseCookies(req.headers.cookie)[SESSION_COOKIE]);
   res.setHeader('Set-Cookie', clearSessionCookie(req));
   return { ok: true };
-});
+}, { authenticated: true });
 
 route('GET', '/api/auth/me', (req) => {
   const running = runningTime(req.user);
   return {
     user: req.user,
-    settings: getSettings(),
+    settings: settingsForUser(getSettings(), req.user),
     time: running ? decorateTime(running) : null,
     todayMinutes: todayMinutes(req.user),
     weekMinutes: weekMinutes(req.user),
   };
-});
+}, { authenticated: true });
 
-route('GET', '/api/auth/meta', (req) => ({
-  app_name: getSettings().app_name,
-  trade: getSettings().trade,
-  trade_tagline: getSettings().trade_tagline,
-  company_name: getSettings().company_name,
-  secure: Boolean(req.socket?.encrypted)
-    || String(req.headers['x-forwarded-proto'] || '').includes('https'),
-  roles: Object.entries(ROLES).map(([key, role]) => ({
-    key, label: role.label, short: role.short, description: role.description, color: role.color,
-    permissions: permissionsFor(key),
-  })),
-  demo_users: ['chef', 'buero', 'vorgesetzt', 'monteur', 'azubi', 'hr'],
-}), { public: true });
+route('GET', '/api/auth/meta', (req) => {
+  const demoUsers = getSettings().demo_mode === '1' ? demoAccountsWithDefaultPassword() : [];
+  return {
+    app_name: getSettings().app_name,
+    trade: getSettings().trade,
+    trade_tagline: getSettings().trade_tagline,
+    company_name: getSettings().company_name,
+    secure: isSecureRequest(req),
+    roles: Object.entries(ROLES).map(([key, role]) => ({
+      key, label: role.label, short: role.short, description: role.description, color: role.color,
+      permissions: permissionsFor(key),
+    })),
+    // Demo-Zugänge nur anzeigen, solange sie noch das Startpasswort haben und Demo-Modus aktiv ist.
+    demo_users: demoUsers,
+    demo_passwords: Object.fromEntries(demoUsers.map((username) => [username, DEMO_PASSWORDS[username]])),
+  };
+}, { public: true });
 
-route('POST', '/api/auth/password', (req) => {
-  changePassword(req.user.id, req.body?.currentPassword, req.body?.newPassword);
-  return { ok: true };
-});
+route('POST', '/api/auth/password', (req, res) => {
+  try {
+    changePassword(req.user.id, req.body?.currentPassword, req.body?.newPassword);
+  } catch (error) {
+    throw new HttpError(400, error.message);
+  }
+  invalidateDemoAccountCache();
+  // Nach dem Beenden aller Sitzungen sofort eine neue für dieses Gerät ausstellen.
+  const token = issueSession(req.user.id, req);
+  res.setHeader('Set-Cookie', sessionCookie(token, req));
+  return { ok: true, user: getUserById(req.user.id) };
+}, { authenticated: true });
 
 // ----------------------------------------------------------------- Einstellungen
-const maskSettings = (settings) => ({
-  ...settings,
-  smtp_password: settings.smtp_password ? '********' : '',
-});
-
 route('GET', '/api/settings', (req) => {
-  const settings = getSettings();
-  if (!can(req.user, 'invoices.view')) {
-    for (const key of ['tax_number', 'vat_id', 'register_court', 'register_number', 'bank_name', 'iban', 'bic']) {
-      delete settings[key];
-    }
+  const result = { settings: settingsForUser(getSettings(), req.user) };
+  if (can(req.user, 'settings.manage')) {
+    result.security = {
+      https: isSecureRequest(req),
+      demo_accounts: demoAccountsWithDefaultPassword(),
+      must_change: db.prepare('SELECT COUNT(*) AS n FROM users WHERE must_change_password = 1').get().n,
+    };
   }
-  return { settings: maskSettings(settings) };
-});
+  return result;
+}, { authenticated: true });
 route('PUT', '/api/settings', (req) => {
   const patch = { ...(req.body ?? {}) };
   // Platzhalter aus dem Formular niemals als Passwort speichern
   if (patch.smtp_password === '********') delete patch.smtp_password;
-  return { settings: maskSettings(setSettings(patch)) };
+  return { settings: settingsForUser(setSettings(patch), req.user) };
 }, { permission: 'settings.manage' });
 
 route('POST', '/api/mail/test', async (req) => {
@@ -1604,10 +1704,12 @@ route('POST', '/api/appointments/:id/confirm-reset', (req, res, params) => {
 
 // Öffentlich: Der Kunde öffnet den Link ohne Anmeldung.
 route('GET', '/api/public/appointments/:token', (req, res, params) => {
+  publicRateLimit(req, 'termin-read', 90);
   return publicAppointment(appointmentByToken(params.token));
 }, { public: true });
 
 route('POST', '/api/public/appointments/:token/confirm', (req, res, params) => {
+  publicRateLimit(req, 'termin-write', 20);
   const appointment = appointmentByToken(params.token);
   db.prepare(`UPDATE appointments
     SET confirmed_at = datetime('now'), declined_at = NULL, customer_reply = NULL
@@ -1618,6 +1720,7 @@ route('POST', '/api/public/appointments/:token/confirm', (req, res, params) => {
 }, { public: true });
 
 route('POST', '/api/public/appointments/:token/decline', (req, res, params) => {
+  publicRateLimit(req, 'termin-write', 20);
   const appointment = appointmentByToken(params.token);
   const reply = str(req.body?.message).slice(0, 500);
   db.prepare(`UPDATE appointments
@@ -1729,7 +1832,12 @@ route('POST', '/api/automation/run', (req, res, params, url) => {
 }, { permission: 'automation.run' });
 
 // ----------------------------------------------------------------- Export
-const csvEscape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+const csvEscape = (value) => {
+  let text = String(value ?? '');
+  // Tabellenkalkulationen dürfen Zellwerte nicht als Formel ausführen.
+  if (/^[=+\-@\t\r]/.test(text) && !/^-?\d+(?:[.,]\d+)?$/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+};
 
 function sendCsv(res, rows, headers, filename) {
   const lines = [headers.map(csvEscape).join(';')];
@@ -1797,7 +1905,7 @@ route('GET', '/api/export/:type', (req, res, params, url) => {
 // ----------------------------------------------------------------- Benutzer
 route('GET', '/api/users', () => db.prepare(
   `SELECT u.id, u.username, u.name, u.role, u.employee_id, u.active, u.created_at, u.last_login,
-     e.name AS employee_name
+     u.must_change_password, e.name AS employee_name
    FROM users u LEFT JOIN employees e ON e.id = u.employee_id
    ORDER BY u.active DESC, u.name`
 ).all().map((row) => ({
@@ -1810,7 +1918,9 @@ route('POST', '/api/users', (req) => {
   const body = req.body ?? {};
   const username = str(body.username).toLowerCase();
   if (!username) throw new HttpError(400, 'Bitte einen Benutzernamen angeben');
+  if (username.length > 100) throw new HttpError(400, 'Der Benutzername ist zu lang');
   if (String(body.password || '').length < 8) throw new HttpError(400, 'Das Passwort muss mindestens 8 Zeichen haben');
+  if (String(body.password || '').length > 200) throw new HttpError(400, 'Das Passwort ist zu lang (maximal 200 Zeichen)');
   if (!ROLES[body.role]) throw new HttpError(400, 'Unbekannte Rolle');
   if (db.prepare('SELECT 1 FROM users WHERE lower(username) = lower(?)').get(username)) {
     throw new HttpError(409, 'Dieser Benutzername ist bereits vergeben');
@@ -1822,18 +1932,31 @@ route('POST', '/api/users', (req) => {
     role: body.role,
     employee_id: body.employee_id ? num(body.employee_id) : null,
     active: bool(body.active ?? 1),
+    must_change_password: 1,
   });
+  invalidateDemoAccountCache();
   logActivity('personal', `Benutzerkonto ${username} (${roleLabel(body.role)}) angelegt.`);
   return db.prepare(
     'SELECT id, username, name, role, employee_id, active, created_at FROM users WHERE id = ?'
   ).get(id);
 }, { permission: 'users.manage' });
 
+function hasOtherActiveChef(userId) {
+  return db.prepare(
+    "SELECT COUNT(*) AS n FROM users WHERE role = 'chef' AND active = 1 AND id != ?"
+  ).get(userId).n > 0;
+}
+
 route('PUT', '/api/users/:id', (req, res, params) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(params.id);
   if (!user) throw new HttpError(404, 'Benutzer nicht gefunden');
   const body = req.body ?? {};
   const data = pick(body, ['username', 'name', 'role', 'employee_id', 'active']);
+  const removesChef = user.role === 'chef'
+    && ((data.role && data.role !== 'chef') || (data.active !== undefined && !bool(data.active)));
+  if (removesChef && !hasOtherActiveChef(user.id)) {
+    throw new HttpError(400, 'Mindestens ein aktives Chef-Konto muss erhalten bleiben');
+  }
   if ('username' in data) {
     data.username = str(data.username).toLowerCase();
     if (!data.username) throw new HttpError(400, 'Bitte einen Benutzernamen angeben');
@@ -1849,17 +1972,36 @@ route('PUT', '/api/users/:id', (req, res, params) => {
   }
   if (body.password) {
     if (String(body.password).length < 8) throw new HttpError(400, 'Das Passwort muss mindestens 8 Zeichen haben');
+    if (String(body.password).length > 200) throw new HttpError(400, 'Das Passwort ist zu lang (maximal 200 Zeichen)');
     data.password_hash = hashPassword(body.password);
+    // Ein vom Admin gesetztes Startpasswort muss beim nächsten Login geändert werden.
+    data.must_change_password = user.id === req.user.id ? 0 : 1;
   }
   updateRow('users', params.id, data);
+  invalidateDemoAccountCache();
+  // Deaktivierte Konten sofort abmelden – auch wenn sie später wieder aktiviert werden.
+  if (data.active === 0) deleteUserSessions(user.id);
+  if (body.password) {
+    deleteUserSessions(user.id);
+    if (user.id === req.user.id) {
+      const token = issueSession(req.user.id, req);
+      res.setHeader('Set-Cookie', sessionCookie(token, req));
+    }
+  }
   return db.prepare(
-    'SELECT id, username, name, role, employee_id, active, created_at FROM users WHERE id = ?'
+    'SELECT id, username, name, role, employee_id, active, created_at, must_change_password FROM users WHERE id = ?'
   ).get(params.id);
 }, { permission: 'users.manage' });
 
 route('DELETE', '/api/users/:id', (req, res, params) => {
   if (Number(params.id) === req.user.id) throw new HttpError(400, 'Das eigene Konto kann nicht gelöscht werden');
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(params.id);
+  if (!user) throw new HttpError(404, 'Benutzer nicht gefunden');
+  if (user.role === 'chef' && !hasOtherActiveChef(user.id)) {
+    throw new HttpError(400, 'Mindestens ein aktives Chef-Konto muss erhalten bleiben');
+  }
   db.prepare('DELETE FROM users WHERE id = ?').run(params.id);
+  invalidateDemoAccountCache();
   return { ok: true };
 }, { permission: 'users.manage' });
 
@@ -1924,6 +2066,8 @@ route('POST', '/api/time', (req) => {
   if (!manager) {
     body.employee_id = req.user.employee_id;
     body.user_id = req.user.id;
+    // Ohne Verwaltungsrecht nur auf eigene Aufträge stempeln.
+    if (body.order_id) assertOrderAccess(req.user, body.order_id);
   }
   const startAt = str(body.start_at) || new Date().toISOString();
   const endAt = str(body.end_at) || null;
@@ -1955,6 +2099,7 @@ route('PUT', '/api/time/:id', (req, res, params) => {
   }
   const data = pick(req.body ?? {}, ['order_id', 'start_at', 'end_at', 'type', 'note']);
   if ('order_id' in data && !data.order_id) data.order_id = null;
+  if (data.order_id && !can(req.user, 'time.manage')) assertOrderAccess(req.user, data.order_id);
   updateRow('time_entries', params.id, data);
   return decorateTime(db.prepare(
     `SELECT t.*, e.name AS employee_name, o.number AS order_number, o.title AS order_title
@@ -2054,7 +2199,7 @@ route('PUT', '/api/reports/:id', (req, res, params) => {
   const report = assertReportAccess(req.user, params.id);
   if (!can(req.user, 'reports.manage')
     && report.user_id !== req.user.id
-    && report.employee_id !== req.user.employee_id) {
+    && (req.user.employee_id == null || report.employee_id !== req.user.employee_id)) {
     throw new HttpError(403, 'Keine Berechtigung für diesen Bericht');
   }
   const body = req.body ?? {};
@@ -2175,7 +2320,9 @@ route('POST', '/api/photos', (req) => {
   const batch = Array.isArray(body.photos) ? body.photos : null;
   const items = batch ?? [body];
   if (!items.length) throw new HttpError(400, 'Keine Fotos übergeben');
+  if (items.length > 20) throw new HttpError(400, 'Bitte höchstens 20 Fotos auf einmal übertragen');
 
+  const counts = new Map();
   const saved = [];
   for (const item of items) {
     const dataUrl = item.dataUrl ?? item.data_url;
@@ -2183,6 +2330,14 @@ route('POST', '/api/photos', (req) => {
     const orderId = num(item.order_id ?? body.order_id);
     if (!orderId) throw new HttpError(400, 'Bitte einen Auftrag auswählen');
     const order = assertOrderAccess(req.user, orderId);
+    if (!counts.has(orderId)) {
+      counts.set(orderId, db.prepare('SELECT COUNT(*) AS n FROM photos WHERE order_id = ?').get(orderId).n);
+    }
+    const count = counts.get(orderId);
+    if (count >= 200) {
+      throw new HttpError(400, 'Für diesen Auftrag sind bereits genug Fotos gespeichert (maximal 200).');
+    }
+    counts.set(orderId, count + 1);
     const rawReportId = item.report_id ?? body.report_id;
     const reportId = rawReportId ? num(rawReportId) : null;
     if (reportId) {
@@ -2192,14 +2347,19 @@ route('POST', '/api/photos', (req) => {
     }
     const kindValue = item.kind ?? body.kind;
     const kind = ['vorher', 'nachher', 'sonstiges'].includes(kindValue) ? kindValue : 'sonstiges';
-    const photo = savePhoto({
-      orderId,
-      reportId,
-      employeeId: req.user.employee_id ?? null,
-      dataUrl,
-      kind,
-      caption: str(item.caption ?? body.caption),
-    });
+    let photo;
+    try {
+      photo = savePhoto({
+        orderId,
+        reportId,
+        employeeId: req.user.employee_id ?? null,
+        dataUrl,
+        kind,
+        caption: str(item.caption ?? body.caption),
+      });
+    } catch (error) {
+      throw new HttpError(400, error.message);
+    }
     saved.push(photoRow(photo));
   }
 
@@ -2248,7 +2408,8 @@ route('GET', '/api/photos/:id/file', (req, res, params) => {
 route('DELETE', '/api/photos/:id', (req, res, params) => {
   const photo = db.prepare('SELECT * FROM photos WHERE id = ?').get(params.id);
   if (!photo) throw new HttpError(404, 'Foto nicht gefunden');
-  if (!can(req.user, 'photos.manage') && photo.employee_id !== req.user.employee_id) {
+  if (!can(req.user, 'photos.manage')
+    && (req.user.employee_id == null || photo.employee_id !== req.user.employee_id)) {
     throw new HttpError(403, 'Dieses Foto gehört nicht zu deinem Konto');
   }
   deletePhoto(photo);
@@ -2302,8 +2463,15 @@ export async function handleApi(req, res, url) {
     let matches = true;
     for (let i = 0; i < entry.segments.length; i += 1) {
       const segment = entry.segments[i];
-      if (segment.startsWith(':')) params[segment.slice(1)] = decodeURIComponent(segments[i]);
-      else if (segment !== segments[i]) {
+      if (segment.startsWith(':')) {
+        try {
+          params[segment.slice(1)] = decodeURIComponent(segments[i]);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ error: 'Ungültiger Pfad' }));
+          return true;
+        }
+      } else if (segment !== segments[i]) {
         matches = false;
         break;
       }
@@ -2316,9 +2484,21 @@ export async function handleApi(req, res, url) {
         res.end(JSON.stringify({ error: 'Bitte zuerst anmelden', code: 'unauthorized' }));
         return true;
       }
+      const passwordChangeAllowed = ['/api/auth/password', '/api/auth/logout', '/api/auth/me']
+        .includes(url.pathname);
+      if (req.user.must_change_password && !passwordChangeAllowed) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          error: 'Bitte zuerst ein neues Passwort festlegen',
+          code: 'password_change_required',
+        }));
+        return true;
+      }
       const allowed = entry.options.permission
         ? can(req.user, entry.options.permission)
-        : !entry.options.permissions || canAny(req.user, entry.options.permissions);
+        : entry.options.permissions
+          ? canAny(req.user, entry.options.permissions)
+          : entry.options.authenticated === true;
       if (!allowed) {
         res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: 'Keine Berechtigung für diese Aktion', code: 'forbidden' }));

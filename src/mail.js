@@ -11,16 +11,18 @@ import { getSettings } from './db.js';
 
 const TIMEOUT = 15000;
 
+const cleanHeaderValue = (value) => String(value ?? '').replace(/[\r\n]+/g, ' ').trim();
+
 export function mailSettings() {
   const settings = getSettings();
   return {
-    host: String(settings.smtp_host || '').trim(),
+    host: cleanHeaderValue(settings.smtp_host),
     port: Number(settings.smtp_port) || 587,
     secure: String(settings.smtp_secure) === '1',
-    user: String(settings.smtp_user || '').trim(),
+    user: cleanHeaderValue(settings.smtp_user),
     password: String(settings.smtp_password || ''),
-    from: String(settings.smtp_from || settings.company_email || '').trim(),
-    fromName: String(settings.smtp_from_name || settings.company_name || '').trim(),
+    from: cleanHeaderValue(settings.smtp_from || settings.company_email),
+    fromName: cleanHeaderValue(settings.smtp_from_name || settings.company_name),
   };
 }
 
@@ -173,7 +175,8 @@ export async function sendMail({ to, subject, text, html = '' }) {
   const config = mailSettings();
   if (!config.host) throw new Error('E-Mail-Versand ist nicht eingerichtet (SMTP-Server fehlt)');
   if (!config.from) throw new Error('E-Mail-Versand ist nicht eingerichtet (Absenderadresse fehlt)');
-  if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new Error('Keine gültige Empfängeradresse');
+  if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(config.from)) throw new Error('Die Absenderadresse ist ungültig');
+  if (!to || !/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(to)) throw new Error('Keine gültige Empfängeradresse');
 
   let socket = await connect(config);
   let reader = attachReader(socket);
@@ -186,13 +189,18 @@ export async function sendMail({ to, subject, text, html = '' }) {
     };
 
     let capabilities = await ehlo();
-    if (!config.secure && /^250[ -]STARTTLS/im.test(capabilities)) {
-      await writeLine(socket, 'STARTTLS');
-      await expectCode(reader, [220], 'STARTTLS');
-      reader.detach();
-      socket = await startTls(socket, config);
-      reader = attachReader(socket);
-      capabilities = await ehlo();
+    if (!config.secure) {
+      if (/^250[ -]STARTTLS/im.test(capabilities)) {
+        await writeLine(socket, 'STARTTLS');
+        await expectCode(reader, [220], 'STARTTLS');
+        reader.detach();
+        socket = await startTls(socket, config);
+        reader = attachReader(socket);
+        capabilities = await ehlo();
+      } else if (config.user) {
+        // Zugangsdaten niemals unverschlüsselt übertragen.
+        throw new Error('Der Mailserver bietet kein STARTTLS – Anmeldung aus Sicherheitsgründen abgebrochen');
+      }
     }
 
     if (config.user) {

@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seedDemoData, seedUsersIfEmpty, seedOperationsIfEmpty, ensureOfficeStaff } from './seed.js';
@@ -9,8 +9,11 @@ export const DATA_DIR = process.env.GASWASSER_DATA || join(ROOT, 'data');
 export const DB_FILE = process.env.GASWASSER_DB || join(DATA_DIR, 'gaswasser.db');
 
 mkdirSync(DATA_DIR, { recursive: true });
+// Datenbank, Fotos und PDFs enthalten Kundendaten – nur für den Betreiber lesbar.
+try { chmodSync(DATA_DIR, 0o700); } catch { /* Windows */ }
 
 export const db = new DatabaseSync(DB_FILE);
+try { chmodSync(DB_FILE, 0o600); } catch { /* Windows */ }
 
 db.exec('PRAGMA journal_mode = WAL;');
 db.exec('PRAGMA foreign_keys = ON;');
@@ -320,6 +323,9 @@ ensureColumn('appointments', 'kind', "TEXT NOT NULL DEFAULT 'baustelle'");
 ensureColumn('appointments', 'customer_id', 'INTEGER');
 ensureColumn('appointments', 'location', 'TEXT');
 ensureColumn('appointments', 'mail_sent_at', 'TEXT');
+ensureColumn('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
+// Sitzungen aus der Zeit vor der Token-Hashing-Umstellung sind ungültig.
+db.exec("DELETE FROM sessions WHERE length(id) != 64;");
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_token
   ON appointments(confirm_token) WHERE confirm_token IS NOT NULL;`);
 
@@ -344,6 +350,7 @@ export const DEFAULT_SETTINGS = {
   smtp_from: '',
   smtp_from_name: '',
   public_url: '',
+  demo_mode: '1',
   mail_notify_replies: '1',
   tax_number: '106/5812/3456',
   vat_id: 'DE123456789',

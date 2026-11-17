@@ -446,8 +446,10 @@ export function seedUsersIfEmpty() {
     ['hr', 'hr123', 'Petra Hoffmann', 'hr', null],
   ];
 
+  // Startpasswörter sind öffentlich bekannt – beim ersten Login muss ein eigenes gesetzt werden.
   const insert = db.prepare(
-    'INSERT INTO users (username, password_hash, name, role, employee_id) VALUES (?,?,?,?,?)'
+    `INSERT INTO users (username, password_hash, name, role, employee_id, must_change_password)
+     VALUES (?,?,?,?,?,1)`
   );
   for (const [username, password, name, role, employee] of demoUsers) {
     insert.run(username, hashPassword(password), name, role, employee);

@@ -1,10 +1,10 @@
 /* HandwerkPro Service Worker – App-Hülle offline, API immer live */
-const CACHE = 'handwerkpro-v7';
+const CACHE = 'handwerkpro-v8';
 const ASSETS = [
   '/',
   '/index.html',
-  '/app.js?v=1.4',
-  '/styles.css?v=1.4',
+  '/app.js?v=1.4.1',
+  '/styles.css?v=1.4.1',
   '/icon.svg',
   '/icon-192.png',
   '/icon-512.png',
