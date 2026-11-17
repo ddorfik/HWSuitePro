@@ -261,8 +261,12 @@ Erzeugte Rechnungs-PDFs werden zusätzlich unter `data/dokumente/` archiviert.
 ## Anmeldung, Daten & Backup
 
 - Anmeldung per Benutzername/Passwort; Passwörter mit **scrypt** gehasht
-- Sessions als **HttpOnly-Cookie** (`hp_session`, 30 Tage, `SameSite=Lax`, bei HTTPS zusätzlich `Secure`)
-- Einfache Brute-Force-Bremse nach 10 Fehlversuchen pro IP
+- Sessions als **HttpOnly-Cookie** (`hp_session`, 30 Tage, `SameSite=Lax`, bei HTTPS zusätzlich `Secure`);
+  in der Datenbank liegt nur der **SHA-256-Hash** des Tokens
+- **Startpasswörter** der Demo-Konten müssen beim ersten Login geändert werden; auch vom Admin
+  gesetzte Passwörter werden beim nächsten Login ersetzt
+- Eine Passwortänderung beendet **alle** bisherigen Sitzungen (auch auf anderen Geräten)
+- Einfache Brute-Force-Bremse nach 10 Fehlversuchen pro IP; öffentliche Terminlinks sind zusätzlich gedrosselt
 - Datenbank: `data/gaswasser.db` (SQLite, WAL-Modus)
 - PDF-Archiv: `data/dokumente/`, Fotos: `data/fotos/`
 - **Backup:** den kompletten `data`-Ordner kopieren – am besten bei gestopptem Server
@@ -297,6 +301,39 @@ SMTP-Client (`src/mail.js`) – weiterhin ohne npm-Abhängigkeiten.
   an die Firmenadresse (abschaltbar über den Schalter im selben Abschnitt).
 - Ohne SMTP-Konfiguration fällt der Button auf das lokale Mailprogramm zurück – die App bleibt
   also auch ohne Zugangsdaten nutzbar.
+
+---
+
+## Sicherheit & produktiver Betrieb
+
+**Vor dem ersten echten Einsatz:**
+
+1. **Alle Demo-Passwörter ändern** (Benutzer & Rechte). Die Konten `chef`, `buero`,
+   `vorgesetzt`, `monteur`, `azubi` und `hr` haben bekannte Startpasswörter. Bei einer **neuen
+   Datenbank** erzwingt die App die Änderung beim ersten Login; bei bestehenden Datenbanken
+   zeigt die Sicherheitskarte, welche Konten noch betroffen sind.
+2. **Demo-Zugänge ausblenden** unter Einstellungen → Sicherheit. Damit verschwinden die
+   Testkonten von der Anmeldeseite; die Passwörter müssen trotzdem geändert werden.
+3. **HTTPS aktivieren.** Entweder direkt über `HTTPS_KEY` / `HTTPS_CERT` oder über einen
+   Reverse-Proxy. Ohne TLS sind Passwörter und Kundendaten im Netzwerk lesbar.
+4. **Nicht ungeschützt ins Internet stellen.** Die App ist für das lokale Netz bzw. VPN gedacht.
+   Für den Zugriff von außen einen Reverse-Proxy mit TLS und vorgeschalteter Anmeldung nutzen.
+
+**Was die App zusätzlich absichert:**
+
+- Rechte werden ausschließlich serverseitig geprüft; neue Routen sind standardmäßig gesperrt,
+  bis ein Recht (oder `public`/`authenticated`) gesetzt ist.
+- Einstellungen werden je Rolle gefiltert: SMTP-Zugang und Bankdaten sieht nur, wer sie braucht;
+  das SMTP-Passwort wird nie im Klartext ausgeliefert.
+- Sicherheitsheader (`CSP`, `X-Frame-Options`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`);
+  bei HTTPS zusätzlich `Strict-Transport-Security`.
+- Ändernde Anfragen mit fremdem `Origin` werden abgelehnt (CSRF-Schutz zusätzlich zu `SameSite`).
+- Kaputte URLs, Cookies oder Host-Header können den Server nicht mehr beenden.
+- Beim Mailversand werden Zugangsdaten nur über TLS/STARTTLS übertragen.
+- `data/` wird unter Linux/macOS mit restriktiven Rechten angelegt (Ordner `700`, Datenbank `600`).
+
+> Die App ersetzt keine Firewall und kein Backup-Konzept. Regelmäßige Sicherungen des
+> `data`-Ordners sind Pflicht.
 
 ---
 
@@ -416,6 +453,10 @@ GET    /api/export/rechnungen.csv     CSV-Export (auch auftraege, kunden, lager)
 - **Web Speech API** für Spracheingabe, **SpeechSynthesis** für Rückmeldungen
 - **PDF** mit eigenem Generator (`src/pdf.js`)
 - **PWA** mit Manifest und Service Worker
+- **Server** hört standardmäßig auf Port `3000` an allen Netzwerkkarten; mit `HOST=127.0.0.1`
+  nur lokal erreichbar, `PORT` ist frei wählbar. HTTPS direkt über `HTTPS_KEY` / `HTTPS_CERT`.
+- Hinter einem Reverse-Proxy `TRUST_PROXY=1` setzen, damit Limits und Cookies die echte
+  Client-Adresse bzw. das ursprüngliche Protokoll verwenden.
 
 Dadurch bleibt das Projekt klein, portabel und langfristig wartbar: Ordner kopieren, `npm start`, fertig.
 
