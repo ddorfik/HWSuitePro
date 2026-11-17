@@ -1,0 +1,11 @@
+# Zeilenenden vereinheitlichen: LF im Repo, CRLF nur für Windows-Batchdateien
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Binärdateien unverändert behandeln
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.woff2 binary
+*.db binary

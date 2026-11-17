@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Lokale Daten, Kundendaten und generierte Dateien – niemals einchecken
+data/*
+!data/.gitkeep
+*.log
+
+# Zertifikate und lokale Konfiguration
+.env
+.env.*
+key.pem
+cert.pem
