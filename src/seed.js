@@ -529,3 +529,68 @@ export function seedOperationsIfEmpty() {
   photoInsert.run(order.id, reportId, employee.id, 'vorher', beforeFile, 'Zustand vor der Reparatur');
   photoInsert.run(order.id, reportId, employee.id, 'nachher', afterFile, 'Fertige Anlage nach der Reparatur');
 }
+
+/* ------------------------------------------------------------------ Büro und HR als Mitarbeiter */
+/**
+ * Legt Büro- und HR-Mitarbeiter an (falls sie fehlen), verknüpft die Benutzerkonten
+ * und ergänzt passende Termine. Mehrfach ausführbar – legt nichts doppelt an.
+ */
+export function ensureOfficeStaff() {
+  const findEmployee = (fragment) => db.prepare(
+    'SELECT * FROM employees WHERE name LIKE ? ORDER BY id LIMIT 1'
+  ).get(`%${fragment}%`);
+
+  const people = [
+    { name: 'Sabine Weber', role: 'Büro', phone: '0211 555 12 40', color: '#0891b2', username: 'buero' },
+    { name: 'Petra Hoffmann', role: 'Personal', phone: '0211 555 12 41', color: '#be123c', username: 'hr' },
+  ];
+
+  let created = 0;
+  for (const person of people) {
+    let employee = findEmployee(person.name.split(' ').pop());
+    if (!employee) {
+      const id = insert(
+        'INSERT INTO employees (name, role, phone, rate, color) VALUES (?,?,?,?,?)',
+        [person.name, person.role, person.phone, 0, person.color]
+      );
+      employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(id);
+      created += 1;
+    }
+    db.prepare(
+      'UPDATE users SET employee_id = ? WHERE username = ? AND (employee_id IS NULL OR employee_id = 0)'
+    ).run(employee.id, person.username);
+  }
+
+  const officeAppointments = db.prepare(
+    `SELECT COUNT(*) AS n FROM appointments a
+     JOIN employees e ON e.id = a.employee_id
+     WHERE e.role IN ('Büro', 'Personal')`
+  ).get().n;
+
+  if (officeAppointments === 0) {
+    const at = (offsetDays, hour) => {
+      const day = new Date();
+      day.setDate(day.getDate() + offsetDays);
+      day.setHours(Math.floor(hour), Math.round((hour % 1) * 60), 0, 0);
+      return day.toISOString();
+    };
+    const entries = [
+      [findEmployee('Weber')?.id, 'meeting', 'Wochenbesprechung Büro', 'Büro', 0, 15, 16, 'Auftragslage und offene Rechnungen mit dem Chef.'],
+      [findEmployee('Weber')?.id, 'sonstiges', 'Angebote nachfassen', 'Büro', 1, 9, 11, 'Rückrufe zu offenen Angeboten und Terminabsprachen.'],
+      [findEmployee('Hoffmann')?.id, 'personal', 'Personalgespräch: Ayla Yilmaz', 'Büro', 1, 9, 10, 'Zwischengespräch Ausbildung gemeinsam mit dem Chef.'],
+      [findEmployee('Hoffmann')?.id, 'meeting', 'Bewerbungsgespräch: Elektroniker', 'Büro', 3, 14, 15, 'Vorstellungsgespräch mit Fachkraft.'],
+    ].filter((entry) => entry[0]);
+    for (const [employeeId, kind, title, location, offset, from, to, notes] of entries) {
+      insert(
+        `INSERT INTO appointments (employee_id, kind, title, location, start_at, end_at, notes)
+         VALUES (?,?,?,?,?,?,?)`,
+        [employeeId, kind, title, location, at(offset, from), at(offset, to), notes]
+      );
+    }
+  }
+
+  if (created > 0) {
+    logActivity('system', 'Büro und Personal als Mitarbeiter angelegt.');
+  }
+  return created;
+}

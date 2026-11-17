@@ -21,11 +21,13 @@ import {
   parseMaterials, savePhoto, photoFile, photoMime, deletePhoto,
   runningTime, startTime, stopTime,
 } from './work.js';
+import { sendMail, mailConfigured } from './mail.js';
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code = null) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -41,6 +43,21 @@ const num = (value, fallback = 0) => {
 const str = (value) => (value == null ? '' : String(value).trim());
 const bool = (value) => (value === true || value === 1 || value === '1' || value === 'true' ? 1 : 0);
 const search = (value) => `%${str(value)}%`;
+
+/** Absolute Adresse für Links in E-Mails (optional über Einstellungen festgelegt). */
+const publicBaseUrl = (req) => {
+  const configured = str(getSettings().public_url).replace(/\/+$/, '');
+  if (configured) return configured;
+  const forwardedHost = str(req.headers['x-forwarded-host']).split(',')[0].trim();
+  const host = forwardedHost || str(req.headers.host) || 'localhost';
+  const forwardedProto = str(req.headers['x-forwarded-proto']).split(',')[0].trim();
+  const proto = forwardedProto || (req.socket?.encrypted ? 'https' : 'http');
+  return `${proto}://${host}`;
+};
+
+const escHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[char]));
 
 /** ISO-Zeitpunkt als deutsche Kurzform, z. B. „20.11.2026, 08:00". */
 const deDateTime = (value) => {
@@ -174,6 +191,74 @@ function appointmentByToken(token) {
 }
 
 /** Öffentliche Sicht auf einen Termin – nur das, was der Kunde sehen darf. */
+const mailDate = (value, options = {}) => new Date(value).toLocaleDateString('de-DE', {
+  weekday: 'long', day: '2-digit', month: 'long', year: 'numeric', timeZone: 'Europe/Berlin', ...options,
+});
+const mailTime = (value) => new Date(value).toLocaleTimeString('de-DE', {
+  hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin',
+});
+
+function mailGreeting(customer) {
+  const lastName = str(customer?.last_name);
+  if (customer?.salutation === 'Herr' && lastName) return `Sehr geehrter Herr ${lastName},`;
+  if (customer?.salutation === 'Frau' && lastName) return `Sehr geehrte Frau ${lastName},`;
+  const company = str(customer?.company);
+  if (company) return `Guten Tag ${company},`;
+  return 'Guten Tag,';
+}
+
+function confirmationMail(req, appointment, customer, token) {
+  const settings = getSettings();
+  const link = `${publicBaseUrl(req)}/termin/${token}`;
+  const date = mailDate(appointment.start_at);
+  const time = `${mailTime(appointment.start_at)} – ${mailTime(appointment.end_at)} Uhr`;
+  const address = [str(customer?.street), [str(customer?.zip), str(customer?.city)].filter(Boolean).join(' ')]
+    .filter(Boolean).join(', ');
+  const subject = `Terminbestätigung: ${date} um ${mailTime(appointment.start_at)} Uhr`;
+  const companyLine = [settings.company_name, settings.company_phone].filter(Boolean).join(' · ');
+
+  const text = [
+    mailGreeting(customer),
+    '',
+    `wir möchten Sie an unseren Termin erinnern und bitten um eine kurze Bestätigung:`,
+    '',
+    `Datum: ${date}`,
+    `Uhrzeit: ${time}`,
+    appointment.title ? `Leistung: ${appointment.title}` : '',
+    address ? `Ort: ${address}` : '',
+    '',
+    'Termin bestätigen oder absagen:',
+    link,
+    '',
+    'Falls der Termin nicht passt, können Sie uns über denselben Link eine Nachricht schicken – wir melden uns dann mit einem neuen Vorschlag.',
+    '',
+    'Freundliche Grüße',
+    settings.company_name,
+    [settings.company_street, `${settings.company_zip} ${settings.company_city}`.trim()].filter(Boolean).join(', '),
+    companyLine,
+  ].filter((line) => line !== '').join('\n');
+
+  const html = `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#0f1c21;line-height:1.6">
+    <p>${escHtml(mailGreeting(customer))}</p>
+    <p>wir möchten Sie an unseren Termin erinnern und bitten um eine kurze Bestätigung:</p>
+    <table style="border-collapse:collapse;margin:14px 0">
+      <tr><td style="padding:3px 14px 3px 0;color:#64748b">Datum</td><td><b>${escHtml(date)}</b></td></tr>
+      <tr><td style="padding:3px 14px 3px 0;color:#64748b">Uhrzeit</td><td><b>${escHtml(time)}</b></td></tr>
+      ${appointment.title ? `<tr><td style="padding:3px 14px 3px 0;color:#64748b">Leistung</td><td>${escHtml(appointment.title)}</td></tr>` : ''}
+      ${address ? `<tr><td style="padding:3px 14px 3px 0;color:#64748b">Ort</td><td>${escHtml(address)}</td></tr>` : ''}
+    </table>
+    <p style="margin:22px 0">
+      <a href="${escHtml(link)}" style="background:#0f4c5c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600">Termin bestätigen</a>
+    </p>
+    <p style="font-size:13px;color:#64748b">Passt der Termin nicht? Über denselben Link können Sie uns absagen und einen Wunsch mitgeben.</p>
+    <p style="margin-top:24px">Freundliche Grüße<br /><b>${escHtml(settings.company_name || '')}</b><br />
+      ${escHtml([settings.company_street, `${settings.company_zip} ${settings.company_city}`.trim()].filter(Boolean).join(', '))}<br />
+      ${escHtml(companyLine)}</p>
+  </div>`;
+
+  return { to: str(customer?.email), subject, text, html, link };
+}
+
 function publicAppointment(row) {
   const settings = getSettings();
   const name = [row.first_name, row.last_name].filter(Boolean).join(' ').trim();
@@ -692,6 +777,11 @@ route('POST', '/api/auth/password', (req) => {
 });
 
 // ----------------------------------------------------------------- Einstellungen
+const maskSettings = (settings) => ({
+  ...settings,
+  smtp_password: settings.smtp_password ? '********' : '',
+});
+
 route('GET', '/api/settings', (req) => {
   const settings = getSettings();
   if (!can(req.user, 'invoices.view')) {
@@ -699,9 +789,33 @@ route('GET', '/api/settings', (req) => {
       delete settings[key];
     }
   }
-  return { settings };
+  return { settings: maskSettings(settings) };
 });
-route('PUT', '/api/settings', (req) => ({ settings: setSettings(req.body ?? {}) }), { permission: 'settings.manage' });
+route('PUT', '/api/settings', (req) => {
+  const patch = { ...(req.body ?? {}) };
+  // Platzhalter aus dem Formular niemals als Passwort speichern
+  if (patch.smtp_password === '********') delete patch.smtp_password;
+  return { settings: maskSettings(setSettings(patch)) };
+}, { permission: 'settings.manage' });
+
+route('POST', '/api/mail/test', async (req) => {
+  const to = str(req.body?.to) || str(getSettings().company_email);
+  if (!to) throw new HttpError(400, 'Bitte eine Empfängeradresse angeben');
+  if (!mailConfigured()) {
+    throw new HttpError(400, 'E-Mail-Versand ist noch nicht eingerichtet. Bitte SMTP-Server und Absender speichern.', 'mail_not_configured');
+  }
+  try {
+    await sendMail({
+      to,
+      subject: `Testmail aus ${getSettings().app_name || 'HandwerkPro'}`,
+      text: `Diese Testmail bestätigt, dass der E-Mail-Versand funktioniert.\n\nGesendet am ${new Date().toLocaleString('de-DE')}.`,
+    });
+  } catch (error) {
+    throw new HttpError(400, error.message, 'mail_failed');
+  }
+  logActivity('system', `Testmail an ${to} gesendet.`);
+  return { ok: true, to };
+}, { permission: 'settings.manage' });
 
 // ----------------------------------------------------------------- Kunden
 route('GET', '/api/customers', (req, res, params, url) => {
@@ -1420,6 +1534,66 @@ route('POST', '/api/appointments/:id/confirm-link', (req, res, params) => {
   return { token, path: `/termin/${token}` };
 }, { permission: 'planning.manage' });
 
+function appointmentWithCustomer(id) {
+  const row = db.prepare(
+    `SELECT a.*, COALESCE(o.customer_id, a.customer_id) AS effective_customer_id,
+       o.number AS order_number
+     FROM appointments a
+     LEFT JOIN orders o ON o.id = a.order_id
+     WHERE a.id = ?`
+  ).get(num(id));
+  if (!row) throw new HttpError(404, 'Termin nicht gefunden');
+  const customer = row.effective_customer_id
+    ? db.prepare('SELECT * FROM customers WHERE id = ?').get(row.effective_customer_id)
+    : null;
+  return { appointment: row, customer };
+}
+
+function ensureConfirmToken(appointment) {
+  if (appointment.confirm_token) return appointment.confirm_token;
+  const token = randomBytes(24).toString('hex');
+  db.prepare('UPDATE appointments SET confirm_token = ? WHERE id = ?').run(token, appointment.id);
+  appointment.confirm_token = token;
+  return token;
+}
+
+route('POST', '/api/appointments/:id/confirm-mail', async (req, res, params) => {
+  const { appointment, customer } = appointmentWithCustomer(params.id);
+  if (!mailConfigured()) {
+    throw new HttpError(400, 'E-Mail-Versand ist noch nicht eingerichtet. Bitte in den Einstellungen einen SMTP-Server hinterlegen.', 'mail_not_configured');
+  }
+  const to = str(customer?.email);
+  if (!to) throw new HttpError(400, 'Für diesen Kunden ist keine E-Mail-Adresse hinterlegt.');
+  const token = ensureConfirmToken(appointment);
+  const mail = confirmationMail(req, appointment, customer, token);
+  try {
+    await sendMail(mail);
+  } catch (error) {
+    throw new HttpError(400, error.message, 'mail_failed');
+  }
+  db.prepare("UPDATE appointments SET mail_sent_at = datetime('now') WHERE id = ?").run(appointment.id);
+  logActivity('termin', `Terminbestätigung an ${to} gesendet.`);
+  return { sent: true, to, link: mail.link };
+}, { permission: 'planning.manage' });
+
+/* Nachricht an das Büro, wenn der Kunde bestätigt oder absagt (best effort). */
+function notifyReply(appointment, statusText) {
+  const settings = getSettings();
+  if (settings.mail_notify_replies !== '1' || !mailConfigured()) return;
+  const to = str(settings.company_email) || str(settings.smtp_from);
+  if (!to) return;
+  const text = [
+    `${statusText}: ${appointment.title}`,
+    '',
+    `Termin: ${mailDate(appointment.start_at)} um ${mailTime(appointment.start_at)} Uhr`,
+    `Kunde: ${[appointment.first_name, appointment.last_name].filter(Boolean).join(' ') || appointment.company || 'unbekannt'}`,
+    appointment.customer_reply ? `Nachricht: ${appointment.customer_reply}` : '',
+    appointment.order_number ? `Auftrag: ${appointment.order_number}` : '',
+  ].filter(Boolean).join('\n');
+  sendMail({ to, subject: `Rückmeldung zum Termin: ${appointment.title}`, text })
+    .catch((error) => logActivity('fehler', `Terminbenachrichtigung: ${error.message}`));
+}
+
 route('POST', '/api/appointments/:id/confirm-reset', (req, res, params) => {
   const appointment = db.prepare('SELECT * FROM appointments WHERE id = ?').get(num(params.id));
   if (!appointment) throw new HttpError(404, 'Termin nicht gefunden');
@@ -1439,6 +1613,7 @@ route('POST', '/api/public/appointments/:token/confirm', (req, res, params) => {
     SET confirmed_at = datetime('now'), declined_at = NULL, customer_reply = NULL
     WHERE id = ?`).run(appointment.id);
   logActivity('termin', `Kunde hat den Termin am ${deDateTime(appointment.start_at)} bestätigt.`);
+  notifyReply(appointmentByToken(params.token), 'Termin bestätigt');
   return publicAppointment(appointmentByToken(params.token));
 }, { public: true });
 
@@ -1449,6 +1624,7 @@ route('POST', '/api/public/appointments/:token/decline', (req, res, params) => {
     SET declined_at = datetime('now'), confirmed_at = NULL, customer_reply = ?
     WHERE id = ?`).run(reply, appointment.id);
   logActivity('termin', `Kunde kann den Termin am ${deDateTime(appointment.start_at)} nicht wahrnehmen${reply ? `: „${reply}“` : ''}.`);
+  notifyReply(appointmentByToken(params.token), 'Termin passt nicht');
   return publicAppointment(appointmentByToken(params.token));
 }, { public: true });
 
@@ -2117,7 +2293,7 @@ route('GET', '/api/voice/search', (req, res, params, url) => {
 
 
 // ----------------------------------------------------------------- Router
-export function handleApi(req, res, url) {
+export async function handleApi(req, res, url) {
   const segments = url.pathname.split('/').filter(Boolean);
   req.user = req.user ?? authenticate(req);
   for (const entry of routes) {
@@ -2151,7 +2327,7 @@ export function handleApi(req, res, url) {
     }
 
     try {
-      const result = entry.handler(req, res, params, url);
+      const result = await entry.handler(req, res, params, url);
       if (result?.__sent) return true;
       if (!result) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2190,7 +2366,10 @@ export function handleApi(req, res, url) {
       const status = error.status ?? 500;
       if (status >= 500) console.error(error);
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: error.message || 'Interner Fehler' }));
+      res.end(JSON.stringify({
+        error: error.message || 'Interner Fehler',
+        ...(error.code ? { code: error.code } : {}),
+      }));
       return true;
     }
   }

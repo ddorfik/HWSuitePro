@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { seedDemoData, seedUsersIfEmpty, seedOperationsIfEmpty } from './seed.js';
+import { seedDemoData, seedUsersIfEmpty, seedOperationsIfEmpty, ensureOfficeStaff } from './seed.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 export const DATA_DIR = process.env.GASWASSER_DATA || join(ROOT, 'data');
@@ -319,6 +319,7 @@ ensureColumn('appointments', 'customer_reply', 'TEXT');
 ensureColumn('appointments', 'kind', "TEXT NOT NULL DEFAULT 'baustelle'");
 ensureColumn('appointments', 'customer_id', 'INTEGER');
 ensureColumn('appointments', 'location', 'TEXT');
+ensureColumn('appointments', 'mail_sent_at', 'TEXT');
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_token
   ON appointments(confirm_token) WHERE confirm_token IS NOT NULL;`);
 
@@ -335,6 +336,15 @@ export const DEFAULT_SETTINGS = {
   company_mobile: '0172 555 12 30',
   company_email: 'info@moeller-gaswasser.de',
   company_web: 'www.moeller-gaswasser.de',
+  smtp_host: '',
+  smtp_port: '587',
+  smtp_secure: '0',
+  smtp_user: '',
+  smtp_password: '',
+  smtp_from: '',
+  smtp_from_name: '',
+  public_url: '',
+  mail_notify_replies: '1',
   tax_number: '106/5812/3456',
   vat_id: 'DE123456789',
   register_court: 'Amtsgericht Düsseldorf',
@@ -429,3 +439,5 @@ if (db.prepare('SELECT COUNT(*) AS n FROM customers').get().n === 0) {
 
 seedUsersIfEmpty();
 seedOperationsIfEmpty();
+// Büro und HR als Mitarbeiter anlegen, damit sie ebenfalls Termine haben können.
+ensureOfficeStaff();

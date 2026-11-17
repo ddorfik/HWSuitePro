@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import net from 'node:net';
 
 const directory = mkdtempSync(join(tmpdir(), 'handwerkpro-test-'));
 process.env.GASWASSER_DATA = directory;
@@ -137,6 +138,40 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     env: { ...process.env, PORT: String(port) },
     stdio: 'ignore',
   });
+
+  // Kleiner SMTP-Server für die E-Mail-Tests
+  const mails = [];
+  const smtpServer = net.createServer((socket) => {
+    let buffer = '';
+    let inData = false;
+    socket.write('220 test.local ESMTP\r\n');
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      if (inData) {
+        const end = buffer.indexOf('\r\n.\r\n');
+        if (end === -1) return;
+        mails.push(buffer.slice(0, end));
+        buffer = buffer.slice(end + 5);
+        inData = false;
+        socket.write('250 2.0.0 Ok: queued\r\n');
+        return;
+      }
+      let index;
+      while ((index = buffer.indexOf('\r\n')) !== -1) {
+        const line = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        if (/^EHLO/i.test(line)) socket.write('250-test.local\r\n250-8BITMIME\r\n250 SIZE 10240000\r\n');
+        else if (/^MAIL FROM/i.test(line)) socket.write('250 2.1.0 Ok\r\n');
+        else if (/^RCPT TO/i.test(line)) socket.write('250 2.1.5 Ok\r\n');
+        else if (/^DATA/i.test(line)) { inData = true; socket.write('354 End data with <CR><LF>.<CR><LF>\r\n'); return; }
+        else if (/^QUIT/i.test(line)) { socket.write('221 2.0.0 Bye\r\n'); socket.end(); }
+        else socket.write('250 2.0.0 Ok\r\n');
+      }
+    });
+    socket.on('error', () => {});
+  });
+  await new Promise((resolve) => smtpServer.listen(0, '127.0.0.1', resolve));
+  const smtpPort = smtpServer.address().port;
 
   const base = `http://127.0.0.1:${port}`;
   let ready = false;
@@ -501,13 +536,85 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     assert.equal((await fetch(`${base}/api/my-day`)).status, 401, 'Mein Tag braucht Anmeldung');
 
     const hrDay = await json(await call(hr.cookie, '/api/my-day'));
-    assert.equal(hrDay.employee, null, 'HR ohne Mitarbeiterkonto');
+    assert.equal(hrDay.employee?.name, 'Petra Hoffmann', 'HR hat ein Mitarbeiterkonto');
+    assert.ok(Array.isArray(hrDay.appointments), 'HR sieht eigene Termine');
     assert.ok(Array.isArray(hrDay.teamToday));
+
+    const officeStaff = await json(await call(chef.cookie, '/api/employees'));
+    assert.ok(officeStaff.some((row) => row.name === 'Sabine Weber' && row.role === 'Büro'));
+    assert.ok(officeStaff.some((row) => row.name === 'Petra Hoffmann' && row.role === 'Personal'));
+
+    // ---------------------------------------------------------- E-Mail-Versand
+    const smtpSettings = await json(await call(chef.cookie, '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        smtp_host: '127.0.0.1',
+        smtp_port: String(smtpPort),
+        smtp_secure: '0',
+        smtp_password: 'geheim',
+        smtp_from: 'noreply@example.test',
+        smtp_from_name: 'HandwerkPro Test',
+      }),
+    }));
+    assert.equal(smtpSettings.settings.smtp_password, '********', 'Passwort wird nie im Klartext ausgeliefert');
+
+    const testMail = await json(await call(chef.cookie, '/api/mail/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: 'test@example.test' }),
+    }));
+    assert.equal(testMail.ok, true);
+    assert.equal(mails.length, 1, 'Testmail wurde zugestellt');
+    assert.match(mails[0], /To: <test@example\.test>/);
+    assert.match(mails[0], /Subject: Testmail aus/);
+
+    const mailedLink = await json(await call(chef.cookie, `/api/appointments/${appointment.id}/confirm-mail`, { method: 'POST' }));
+    assert.equal(mailedLink.sent, true);
+    assert.equal(mails.length, 2, 'Terminbestätigung wurde versendet');
+    assert.match(mailedLink.link, /^http:\/\/127\.0\.0\.1:\d+\/termin\/[a-f0-9]{48}$/);
+    // Nachrichtentext ist Base64-kodiert – zum Prüfen dekodieren
+    const mailBody = mails[1].split('\r\n')
+      .filter((line) => /^[A-Za-z0-9+/=]{20,}$/.test(line))
+      .map((line) => Buffer.from(line, 'base64').toString('utf8'))
+      .join('');
+    assert.ok(mailBody.includes('/termin/'), 'E-Mail enthält den Bestätigungslink');
+    assert.ok(mailBody.includes('Termin bestätigen'), 'E-Mail enthält eine Handlungsaufforderung');
+
+    const afterMail = await json(await call(chef.cookie, '/api/appointments'));
+    assert.ok(afterMail.find((row) => row.id === appointment.id)?.mail_sent_at, 'Versandzeitpunkt wird gespeichert');
+
+    // Kunde bestätigt → das Büro bekommt eine Benachrichtigung
+    await fetch(`${base}/api/public/appointments/${token}/confirm`, { method: 'POST' });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const decodeMail = (raw) => raw.split('\r\n')
+      .filter((line) => /^[A-Za-z0-9+/=]{20,}$/.test(line))
+      .map((line) => Buffer.from(line, 'base64').toString('utf8'))
+      .join('');
+    assert.ok(mails.some((mail) => decodeMail(mail).includes('Termin bestätigt')),
+      'Büro wird bei Bestätigung per E-Mail informiert');
+
+    // Ohne Konfiguration: klare Fehlermeldung mit Code
+    await call(chef.cookie, '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ smtp_host: '', smtp_from: '' }),
+    });
+    const noMail = await call(chef.cookie, '/api/mail/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: 'test@example.test' }),
+    });
+    assert.equal(noMail.status, 400);
+    assert.equal((await noMail.json()).code, 'mail_not_configured');
+    assert.equal((await call(monteur.cookie, `/api/appointments/${appointment.id}/confirm-mail`, { method: 'POST' })).status, 403,
+      'Nur Planung darf Bestätigungen versenden');
 
     // ---------------------------------------------------------- Abmelden
     await call(chef.cookie, '/api/auth/logout', { method: 'POST' });
     assert.equal((await call(chef.cookie, '/api/dashboard')).status, 401);
   } finally {
+    smtpServer.close();
     child.kill();
   }
 });

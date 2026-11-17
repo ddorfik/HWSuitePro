@@ -182,7 +182,8 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 
 ### Mein Tag
 
-- Persönliche Tagesansicht für **jede Rolle mit Mitarbeiterkonto** – auch Chef und Vorgesetzte
+- Persönliche Tagesansicht für **jede Rolle** – Chef, Vorgesetzte, Büro, HR und Monteure
+  (Büro und Personal werden als Mitarbeiter geführt und können Termine erhalten)
 - Eigene Termine des Tages und der nächsten zwei Wochen, inkl. Kundenbesuchen, Meetings,
   Personalgesprächen, Lieferanten- und Fortbildungsterminen
 - Kennzahlen passend zur Rolle (offene Aufträge, Berichte zur Freigabe, überfällige Rechnungen)
@@ -190,21 +191,23 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 
 ### Einsatzplanung / Kalender
 
-- Wochenkalender mit allen Terminen, farblich je Monteur
+- Wochen- **und Monatsansicht**, farblich je Monteur, mit Filter-Chips nach Terminart
 - **Terminarten**: Baustelle, Kundenbesuch, Meeting, Personal/HR, Notdienst, Fortbildung,
-  Lieferant, Sonstiges – mit Filter-Chips über dem Kalender
+  Lieferant, Sonstiges
 - Termine per Klick in freie Zeitfenster anlegen; Kunde, Auftrag und Ort sind optional
 - Monteure sehen nur ihre eigenen Termine, Büro/Chef/Vorgesetzte alle
 - **Terminbestätigung per Link**: Ein Klick erzeugt einen persönlichen Link
   (`/termin/<token>`), den der Kunde ohne Anmeldung öffnen kann. Er bestätigt den Termin oder
   meldet zurück, dass er nicht passt – optional mit Wunsch oder Begründung. Der Status
-  (offen / bestätigt / abgelehnt) ist im Kalender und im Termin sichtbar; der Link lässt sich
-  direkt per E-Mail-Programm versenden.
+  (offen / bestätigt / abgelehnt) ist im Kalender und im Termin sichtbar.
 
   Der Link enthält einen zufälligen Token (48 Hex-Zeichen) und gilt nur für diesen einen Termin.
   Er ersetzt keine Termineinladung per Post – bitte nur an den Kunden selbst weitergeben.
-  E-Mails werden **nicht** automatisch versendet: der E-Mail-Button öffnet das lokale
-  Mailprogramm mit fertigem Text, damit kein SMTP-Zugang nötig ist.
+
+  Ist ein SMTP-Zugang hinterlegt, verschickt **„Per E-Mail senden"** die Bestätigung direkt an
+  die beim Kunden gespeicherte Adresse. Ohne SMTP öffnet der Button wie bisher das lokale
+  Mailprogramm. Bestätigt oder verschiebt der Kunde den Termin, kann das Büro automatisch eine
+  kurze Benachrichtigung per E-Mail erhalten (abschaltbar).
 
 ### Material & Lager
 
@@ -271,6 +274,32 @@ Erzeugte Rechnungs-PDFs werden zusätzlich unter `data/dokumente/` archiviert.
 
 ---
 
+## E-Mail-Versand (SMTP)
+
+Terminbestätigungen kann die App selbst verschicken. Dafür in **Einstellungen → E-Mail-Versand**
+eintragen:
+
+| Feld | Beispiel | Hinweis |
+|---|---|---|
+| SMTP-Server | `smtp.ionos.de` | Hostname deines Providers |
+| Port | `587` | 587 = STARTTLS, 465 = SSL/TLS |
+| SSL/TLS direkt | aus / an | bei Port 465 aktivieren |
+| Benutzername | `info@firma.de` | meist die vollständige Adresse |
+| Passwort | •••••• | bleibt lokal in `data/gaswasser.db` |
+| Absenderadresse | `info@firma.de` | muss der Provider erlauben |
+| Öffentliche Adresse | `https://app.firma.de` | Basis für Links in E-Mails |
+
+Danach **Speichern** und mit **Testmail** prüfen. Der Versand läuft über einen eigenen, kleinen
+SMTP-Client (`src/mail.js`) – weiterhin ohne npm-Abhängigkeiten.
+
+- **„Per E-Mail senden"** im Termin verschickt die Bestätigung an die Kundenadresse.
+- **Rückmeldungen**: Bestätigt oder verschiebt der Kunde den Termin, geht eine kurze Nachricht
+  an die Firmenadresse (abschaltbar über den Schalter im selben Abschnitt).
+- Ohne SMTP-Konfiguration fällt der Button auf das lokale Mailprogramm zurück – die App bleibt
+  also auch ohne Zugangsdaten nutzbar.
+
+---
+
 ## Projektstruktur
 
 ```text
@@ -284,6 +313,7 @@ GasWasserPro/
 │   ├── password.js         scrypt-Hashing
 │   ├── permissions.js      Rollen und Rechte-Matrix
 │   ├── work.js             Materialparser, Fotos, Zeiterfassung
+│   ├── mail.js             SMTP-Versand ohne Abhängigkeiten
 │   ├── api.js              REST-API inkl. Auth- und Rechteprüfung
 │   ├── billing.js          Rechnungen, Zahlungen, Mahnungen, Lagerbuchungen
 │   ├── automation.js       Automatik (Verträge, Rechnungen, Mahnungen)
@@ -357,6 +387,8 @@ POST   /api/customers/:id/notes       Notiz anlegen (Büro/Chef)
 DELETE /api/customers/:id/notes/:id   Notiz löschen (Büro/Chef)
 
 GET    /api/my-day                    Eigene Termine, Kennzahlen und Team-Übersicht
+POST   /api/mail/test                 Testmail über SMTP versenden (Einstellungen)
+POST   /api/appointments/:id/confirm-mail   Terminbestätigung per E-Mail an den Kunden
 GET    /api/appointments              Termine (Filter: from, to; inkl. Terminart, Ort, Kunde)
 POST   /api/appointments              Termin anlegen
 POST   /api/appointments/:id/confirm-link   Bestätigungslink erzeugen (stabil)
