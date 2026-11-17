@@ -2,6 +2,10 @@
 
 Danke, dass du mitmachst! Dieses Dokument beschreibt, wie wir gemeinsam am Projekt arbeiten.
 
+> **KI-Assistenten** (Copilot, Claude, Codex, OpenCode …): Bitte zuerst
+> **[AGENTS.md](AGENTS.md)** lesen – dort stehen die Hausregeln, Rezepte für neue
+> Endpunkte/Ansichten und die Definition of Done in kompakter Form.
+
 ## Voraussetzungen
 
 - **Node.js 24 oder neuer** (nutzt das eingebaute `node:sqlite`)
