@@ -372,10 +372,61 @@ export function seedDemoData() {
     logActivity('lager', 'Gasdruckregler 1/2" aus Lager entnommen (Auftrag Gastherme).');
 
     db.exec('COMMIT');
+
+    // Büro- und Führungstermine (außerhalb der Transaktion, eigene Prüfung)
+    seedOfficeAppointments();
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+/* ------------------------------------------------------------------ Büro- und Führungstermine */
+/**
+ * Typische Termine von Chef und Vorgesetztem: Kundenbesuche, Besprechungen,
+ * Personalgespräche, Lieferanten und Fortbildungen.
+ * Läuft nur, wenn noch keine solchen Termine existieren (idempotent).
+ */
+export function seedOfficeAppointments() {
+  const existing = db.prepare("SELECT COUNT(*) AS n FROM appointments WHERE kind IS NOT NULL AND kind <> 'baustelle'").get().n;
+  if (existing > 0) return 0;
+
+  const emp = (fragment) => db.prepare(
+    'SELECT id FROM employees WHERE name LIKE ? ORDER BY id LIMIT 1'
+  ).get(`%${fragment}%`)?.id ?? null;
+  const cust = (number) => db.prepare('SELECT id FROM customers WHERE number = ?').get(number)?.id ?? null;
+  if (!emp('Möller') || !cust('KD-1001')) return 0;
+
+  const at = (offsetDays, hour) => {
+    const day = new Date();
+    day.setDate(day.getDate() + offsetDays);
+    day.setHours(Math.floor(hour), Math.round((hour % 1) * 60), 0, 0);
+    return day.toISOString();
+  };
+
+  const entries = [
+    // Chef
+    [emp('Möller'), cust('KD-1002'), 'kundenbesuch', 'Kundenbesuch: Angebot Heizungstausch', 'Lindenstraße 7, Düsseldorf', 0, 10, 11, 'Vor-Ort-Termin zur Aufnahme der neuen Anlage.'],
+    [emp('Möller'), null, 'meeting', 'Wochenbesprechung Büro', 'Büro', 0, 15, 16, 'Auftragslage, offene Rechnungen und Personalthemen mit dem Büro.'],
+    [emp('Möller'), null, 'personal', 'Personalgespräch: Ayla Yilmaz', 'Büro', 1, 9, 10, 'Zwischengespräch Ausbildung, Feedback zum letzten Bericht.'],
+    [emp('Möller'), cust('KD-1001'), 'kundenbesuch', 'Kundenbesuch: Jahresgespräch Hausverwaltung', 'Königsallee 42, Düsseldorf', 2, 11, 12, 'Rahmenvertrag und Wartungspauschale für das kommende Jahr besprechen.'],
+    [emp('Möller'), null, 'lieferant', 'Lieferantentermin Großhandel', 'Werkstatt', 3, 13, 14, 'Preise für Brennwertgeräte und Lieferzeiten klären.'],
+    [emp('Möller'), null, 'fortbildung', 'Schulung: Trinkwasserverordnung', 'Schulungsraum Düsseldorf', 4, 8, 12, 'Pflichtschulung inklusive Zertifikat.'],
+    // Vorgesetzter
+    [emp('Klein'), null, 'meeting', 'Team-Meeting Montage', 'Büro', 0, 7, 8, 'Tagesplanung mit den Monteuren, offene Baustellen durchgehen.'],
+    [emp('Klein'), cust('KD-1003'), 'kundenbesuch', 'Kundenbesuch: Wartungsvertrag Bäckerei', 'Marktplatz 3, Ratingen', 1, 10, 11, 'Wartungsvertrag für die Backstube anbieten.'],
+    [emp('Klein'), null, 'meeting', 'Materialbestellung mit Büro', 'Büro', 2, 14, 15, 'Bestand prüfen und Nachbestellung für nächste Woche abstimmen.'],
+    [emp('Klein'), null, 'notdienst', 'Notdienst-Bereitschaft', 'Telefonisch', 5, 17, 20, 'Rufbereitschaft, Absprache mit der Zentrale.'],
+  ];
+
+  for (const [employeeId, customerId, kind, title, location, offset, from, to, notes] of entries) {
+    insert(
+      `INSERT INTO appointments (employee_id, customer_id, kind, title, location, start_at, end_at, notes)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [employeeId, customerId, kind, title, location, at(offset, from), at(offset, to), notes]
+    );
+  }
+  return entries.length;
 }
 
 /* ------------------------------------------------------------------ Benutzer */

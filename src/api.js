@@ -165,7 +165,7 @@ function appointmentByToken(token) {
      FROM appointments a
      LEFT JOIN orders o ON o.id = a.order_id
      LEFT JOIN employees e ON e.id = a.employee_id
-     LEFT JOIN customers c ON c.id = o.customer_id
+     LEFT JOIN customers c ON c.id = COALESCE(o.customer_id, a.customer_id)
      LEFT JOIN properties p ON p.id = o.property_id
      WHERE a.confirm_token = ?`
   ).get(value);
@@ -181,6 +181,9 @@ function publicAppointment(row) {
   return {
     appointment: {
       title: row.title,
+      kind: row.kind || 'baustelle',
+      kind_label: APPOINTMENT_KINDS[row.kind] || APPOINTMENT_KINDS.baustelle,
+      location: str(row.location),
       start_at: row.start_at,
       end_at: row.end_at,
       confirmed_at: row.confirmed_at || null,
@@ -348,6 +351,66 @@ route('GET', '/api/dashboard', (req) => {
   if (can(user, 'orders.view.own')) return technicianDashboard(user);
   return hrDashboard(user);
 }, { permission: 'dashboard.view' });
+
+// Persönlicher Tag für alle Rollen mit eigenem Mitarbeiterkonto (Chef, Vorgesetzte, Monteure)
+route('GET', '/api/my-day', (req) => {
+  const user = req.user;
+  const today = todayISO();
+  const employeeId = ownEmployeeId(user);
+  const employee = employeeId > 0
+    ? db.prepare('SELECT id, name, color FROM employees WHERE id = ?').get(employeeId)
+    : null;
+
+  const rows = employeeId > 0 ? db.prepare(
+    `SELECT a.*, o.number AS order_number, o.title AS order_title, o.status AS order_status,
+       e.name AS employee_name, e.color AS employee_color,
+       c.id AS customer_id, c.company, c.first_name, c.last_name,
+       c.street AS customer_street, c.city AS customer_city,
+       p.label AS property_label, p.street AS property_street, p.city AS property_city
+     FROM appointments a
+     LEFT JOIN orders o ON o.id = a.order_id
+     LEFT JOIN employees e ON e.id = a.employee_id
+     LEFT JOIN customers c ON c.id = COALESCE(o.customer_id, a.customer_id)
+     LEFT JOIN properties p ON p.id = o.property_id
+     WHERE a.employee_id = ? AND date(a.start_at) BETWEEN date(?) AND date(?, '+13 days')
+     ORDER BY a.start_at`
+  ).all(employeeId, today, today) : [];
+
+  const isToday = (row) => String(row.start_at).slice(0, 10) === today;
+  const kpis = {
+    openOrders: hasAllOrders(user)
+      ? db.prepare("SELECT COUNT(*) AS n FROM orders WHERE doc_type = 'auftrag' AND status IN ('neu','geplant','in_arbeit')").get().n
+      : 0,
+    reportsToApprove: can(user, 'reports.approve')
+      ? db.prepare("SELECT COUNT(*) AS n FROM reports WHERE status = 'eingereicht'").get().n
+      : 0,
+    overdueInvoices: can(user, 'invoices.view')
+      ? db.prepare(
+        "SELECT COUNT(*) AS n FROM invoices WHERE status IN ('offen','teilweise','gemahnt') AND date(due_date) < date(?)"
+      ).get(today).n
+      : 0,
+  };
+
+  const teamToday = can(user, 'employees.view')
+    ? db.prepare(
+      `SELECT e.id, e.name, e.color, COUNT(a.id) AS appointments
+       FROM employees e
+       LEFT JOIN appointments a ON a.employee_id = e.id AND date(a.start_at) = date(?)
+       WHERE e.active = 1
+       GROUP BY e.id
+       ORDER BY e.name`
+    ).all(today)
+    : [];
+
+  return {
+    today,
+    employee,
+    appointments: rows.filter(isToday),
+    upcoming: rows.filter((row) => !isToday(row)),
+    kpis,
+    teamToday,
+  };
+});
 
 function managementDashboard(user) {
   const showMoney = can(user, 'invoices.view');
@@ -1275,6 +1338,19 @@ route('GET', '/api/orders/:id/pdf', (req, res, params) => {
 }, { permission: 'orders.view.all' });
 
 // ----------------------------------------------------------------- Termine
+export const APPOINTMENT_KINDS = {
+  baustelle: 'Baustelle / Auftrag',
+  kundenbesuch: 'Kundenbesuch / Beratung',
+  meeting: 'Meeting / Besprechung',
+  personal: 'Personal / HR',
+  notdienst: 'Notdienst',
+  fortbildung: 'Fortbildung / Schulung',
+  lieferant: 'Lieferant / Werkstatt',
+  sonstiges: 'Sonstiges',
+};
+
+const appointmentKind = (value) => (APPOINTMENT_KINDS[str(value)] ? str(value) : 'baustelle');
+
 route('GET', '/api/appointments', (req, res, params, url) => {
   const from = str(url.searchParams.get('from')) || addDays(todayISO(), -7);
   const to = str(url.searchParams.get('to')) || addDays(todayISO(), 28);
@@ -1282,11 +1358,13 @@ route('GET', '/api/appointments', (req, res, params, url) => {
   return db.prepare(
     `SELECT a.*, o.number AS order_number, o.title AS order_title, o.status AS order_status,
        e.name AS employee_name, e.color AS employee_color,
-       c.company, c.first_name, c.last_name, c.id AS customer_id, p.label AS property_label
+       c.company, c.first_name, c.last_name, c.id AS customer_id, c.street AS customer_street,
+       c.zip AS customer_zip, c.city AS customer_city,
+       p.label AS property_label, p.street AS property_street, p.city AS property_city
      FROM appointments a
      LEFT JOIN orders o ON o.id = a.order_id
      LEFT JOIN employees e ON e.id = a.employee_id
-     LEFT JOIN customers c ON c.id = o.customer_id
+     LEFT JOIN customers c ON c.id = COALESCE(o.customer_id, a.customer_id)
      LEFT JOIN properties p ON p.id = o.property_id
      WHERE date(a.start_at) BETWEEN date(?) AND date(?)
        ${ownOnly ? 'AND a.employee_id = ?' : ''}
@@ -1301,8 +1379,11 @@ route('POST', '/api/appointments', (req) => {
   }
   const id = insertRow('appointments', {
     order_id: body.order_id ? num(body.order_id) : null,
+    customer_id: body.customer_id ? num(body.customer_id) : null,
     employee_id: body.employee_id ? num(body.employee_id) : null,
+    kind: appointmentKind(body.kind),
     title: str(body.title),
+    location: str(body.location),
     start_at: str(body.start_at),
     end_at: str(body.end_at),
     notes: str(body.notes),
@@ -1313,8 +1394,10 @@ route('POST', '/api/appointments', (req) => {
 
 route('PUT', '/api/appointments/:id', (req, res, params) => {
   const body = req.body ?? {};
-  const data = pick(body, ['order_id', 'employee_id', 'title', 'start_at', 'end_at', 'notes', 'status']);
+  const data = pick(body, ['order_id', 'customer_id', 'employee_id', 'kind', 'title', 'location', 'start_at', 'end_at', 'notes', 'status']);
   if ('order_id' in data && !data.order_id) data.order_id = null;
+  if ('customer_id' in data && !data.customer_id) data.customer_id = null;
+  if ('kind' in data) data.kind = appointmentKind(data.kind);
   if ('employee_id' in data && !data.employee_id) data.employee_id = null;
   updateRow('appointments', params.id, data);
   return db.prepare('SELECT * FROM appointments WHERE id = ?').get(params.id);

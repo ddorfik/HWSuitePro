@@ -861,3 +861,33 @@ body.logged-out { background: radial-gradient(1200px 600px at 10% 0%, #14434f 0%
 /* Terminzeile im Auftrag: öffnet den Termin inkl. Bestätigung */
 .appt-row { padding: 4px 6px; border-radius: 6px; cursor: pointer; }
 .appt-row:hover { background: var(--surface-2); }
+
+/* ---------------------------------------------------------------- Mein Tag (Büro/Chef) */
+.kind-chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600; color: var(--kc, var(--brand));
+  background: color-mix(in srgb, var(--kc, var(--brand)) 12%, #fff);
+  border: 1px solid color-mix(in srgb, var(--kc, var(--brand)) 22%, #fff);
+  white-space: nowrap;
+}
+.kind-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--kc, var(--brand)); display: inline-block; }
+.chip .kind-dot { margin-right: 2px; }
+.e-kdot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: 1px; }
+
+.day-list { display: flex; flex-direction: column; gap: 2px; }
+.day-row {
+  display: flex; align-items: flex-start; gap: 12px; padding: 9px 8px; border-radius: 10px;
+  cursor: pointer; border-bottom: 1px solid var(--line);
+}
+.day-row:last-child { border-bottom: 0; }
+.day-row:hover { background: var(--surface-2); }
+.dr-time { min-width: 52px; font-size: 14px; font-weight: 700; color: var(--brand); line-height: 1.2; }
+.dr-time small { display: block; font-size: 10.5px; font-weight: 500; color: var(--muted); }
+.dr-main { flex: 1; min-width: 0; }
+.dr-title { font-weight: 600; font-size: 13.5px; }
+.dr-sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.upcoming-day + .upcoming-day { margin-top: 12px; }
+.upcoming-date { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 2px; }
+.upcoming-day .day-row { padding-top: 7px; padding-bottom: 7px; }
+.team-day { display: flex; flex-wrap: wrap; gap: 10px 22px; }
+.team-day-item { display: flex; align-items: center; gap: 7px; font-size: 13px; }

@@ -451,6 +451,59 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     assert.equal(resetView.appointment.declined_at, null);
     assert.equal(resetView.appointment.customer_reply, '');
 
+    // ---------------------------------------------------------- Terminarten und Mein Tag
+    const meeting = await json(await call(chef.cookie, '/api/appointments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'meeting',
+        title: 'Wochenbesprechung Büro',
+        location: 'Büro',
+        customer_id: customers[0].id,
+        employee_id: 1,
+        start_at: new Date(`${new Date().toISOString().slice(0, 10)}T15:00:00`).toISOString(),
+        end_at: new Date(`${new Date().toISOString().slice(0, 10)}T16:00:00`).toISOString(),
+      }),
+    }));
+    assert.equal(meeting.kind, 'meeting');
+    assert.equal(meeting.location, 'Büro');
+    assert.equal(meeting.customer_id, customers[0].id);
+
+    const changedKind = await json(await call(chef.cookie, `/api/appointments/${meeting.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'kundenbesuch', location: 'beim Kunden' }),
+    }));
+    assert.equal(changedKind.kind, 'kundenbesuch');
+    const fallbackKind = await json(await call(chef.cookie, `/api/appointments/${meeting.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'gibtsnicht' }),
+    }));
+    assert.equal(fallbackKind.kind, 'baustelle', 'Unbekannte Terminart fällt auf Baustelle zurück');
+
+    const listWithKind = await json(await call(chef.cookie, '/api/appointments'));
+    const listing = listWithKind.find((row) => row.id === meeting.id);
+    assert.ok(listing, 'Termin erscheint in der Liste');
+    assert.ok(listing.customer_id, 'Kunde ist auch ohne Auftrag verknüpft');
+    assert.ok(listing.company || listing.first_name, 'Kundendaten werden mitgeliefert');
+
+    const myDay = await json(await call(chef.cookie, '/api/my-day'));
+    assert.equal(myDay.employee.name, 'Stefan Möller');
+    assert.ok(Array.isArray(myDay.appointments));
+    assert.ok(Array.isArray(myDay.upcoming));
+    assert.ok(myDay.appointments.some((row) => row.kind), 'Eigene Termine enthalten die Terminart');
+    assert.ok(myDay.teamToday.length >= 3, 'Team-Übersicht für Führungskräfte');
+
+    const monteurDay = await json(await call(monteur.cookie, '/api/my-day'));
+    assert.ok(monteurDay.employee, 'Monteur hat einen eigenen Tag');
+    assert.equal(monteurDay.kpis.reportsToApprove, 0, 'Monteur sieht keine Freigaben');
+    assert.equal((await fetch(`${base}/api/my-day`)).status, 401, 'Mein Tag braucht Anmeldung');
+
+    const hrDay = await json(await call(hr.cookie, '/api/my-day'));
+    assert.equal(hrDay.employee, null, 'HR ohne Mitarbeiterkonto');
+    assert.ok(Array.isArray(hrDay.teamToday));
+
     // ---------------------------------------------------------- Abmelden
     await call(chef.cookie, '/api/auth/logout', { method: 'POST' });
     assert.equal((await call(chef.cookie, '/api/dashboard')).status, 401);

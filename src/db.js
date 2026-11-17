@@ -315,6 +315,10 @@ ensureColumn('appointments', 'confirm_token', 'TEXT');
 ensureColumn('appointments', 'confirmed_at', 'TEXT');
 ensureColumn('appointments', 'declined_at', 'TEXT');
 ensureColumn('appointments', 'customer_reply', 'TEXT');
+// Terminart, Ort und optionaler Kunde (für Kundenbesuche/Meetings ohne Auftrag)
+ensureColumn('appointments', 'kind', "TEXT NOT NULL DEFAULT 'baustelle'");
+ensureColumn('appointments', 'customer_id', 'INTEGER');
+ensureColumn('appointments', 'location', 'TEXT');
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_token
   ON appointments(confirm_token) WHERE confirm_token IS NOT NULL;`);
 

@@ -180,11 +180,21 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 - Mehrere Objekte pro Kunde (z. B. Gas-/Wasseranschluss, Heizungsart, Zählernummer)
 - Kundenakte mit Objekten, Aufträgen, Rechnungen und offenen Beträgen
 
-### Einsatzplanung
+### Mein Tag
+
+- Persönliche Tagesansicht für **jede Rolle mit Mitarbeiterkonto** – auch Chef und Vorgesetzte
+- Eigene Termine des Tages und der nächsten zwei Wochen, inkl. Kundenbesuchen, Meetings,
+  Personalgesprächen, Lieferanten- und Fortbildungsterminen
+- Kennzahlen passend zur Rolle (offene Aufträge, Berichte zur Freigabe, überfällige Rechnungen)
+- Team-Übersicht „Wer ist heute im Einsatz“ (bei Recht `employees.view`)
+
+### Einsatzplanung / Kalender
 
 - Wochenkalender mit allen Terminen, farblich je Monteur
-- Termine per Klick in freie Zeitfenster anlegen
-- Monteure sehen nur ihre eigenen Termine
+- **Terminarten**: Baustelle, Kundenbesuch, Meeting, Personal/HR, Notdienst, Fortbildung,
+  Lieferant, Sonstiges – mit Filter-Chips über dem Kalender
+- Termine per Klick in freie Zeitfenster anlegen; Kunde, Auftrag und Ort sind optional
+- Monteure sehen nur ihre eigenen Termine, Büro/Chef/Vorgesetzte alle
 - **Terminbestätigung per Link**: Ein Klick erzeugt einen persönlichen Link
   (`/termin/<token>`), den der Kunde ohne Anmeldung öffnen kann. Er bestätigt den Termin oder
   meldet zurück, dass er nicht passt – optional mit Wunsch oder Begründung. Der Status
@@ -346,7 +356,8 @@ GET    /api/customers/:id/notes       Kundennotizen (Autor + Zeitstempel)
 POST   /api/customers/:id/notes       Notiz anlegen (Büro/Chef)
 DELETE /api/customers/:id/notes/:id   Notiz löschen (Büro/Chef)
 
-GET    /api/appointments              Termine (Filter: from, to)
+GET    /api/my-day                    Eigene Termine, Kennzahlen und Team-Übersicht
+GET    /api/appointments              Termine (Filter: from, to; inkl. Terminart, Ort, Kunde)
 POST   /api/appointments              Termin anlegen
 POST   /api/appointments/:id/confirm-link   Bestätigungslink erzeugen (stabil)
 POST   /api/appointments/:id/confirm-reset  Bestätigung zurücksetzen

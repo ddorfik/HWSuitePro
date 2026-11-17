@@ -63,6 +63,23 @@ const STATUS_LABELS = {
 };
 const PRIORITY_LABELS = { normal: 'Normal', hoch: 'Hoch', dringend: 'Dringend' };
 
+const APPOINTMENT_KINDS = {
+  baustelle: { label: 'Baustelle / Auftrag', color: '#0f4c5c', icon: 'box' },
+  kundenbesuch: { label: 'Kundenbesuch / Beratung', color: '#1d4ed8', icon: 'user' },
+  meeting: { label: 'Meeting / Besprechung', color: '#6d28d9', icon: 'users' },
+  personal: { label: 'Personal / HR', color: '#be123c', icon: 'users' },
+  notdienst: { label: 'Notdienst', color: '#b91c1c', icon: 'alert' },
+  fortbildung: { label: 'Fortbildung / Schulung', color: '#b45309', icon: 'file' },
+  lieferant: { label: 'Lieferant / Werkstatt', color: '#0f766e', icon: 'box' },
+  sonstiges: { label: 'Sonstiges', color: '#64748b', icon: 'calendar' },
+};
+const kindInfo = (kind) => APPOINTMENT_KINDS[kind] || APPOINTMENT_KINDS.baustelle;
+const kindLabel = (kind) => kindInfo(kind).label;
+const kindChip = (kind) => {
+  const info = kindInfo(kind);
+  return `<span class="kind-chip" style="--kc:${info.color}"><span class="kind-dot"></span>${esc(info.label)}</span>`;
+};
+
 const statusBadge = (status) =>
   `<span class="badge ${esc(status)}"><span class="dot"></span>${esc(STATUS_LABELS[status] || status)}</span>`;
 
@@ -318,7 +335,7 @@ const PAGES = {
   time: { title: 'Zeiterfassung', sub: 'Ein- und Ausstempeln, Zeiten nachtragen', primary: { label: 'Zeit nachtragen', action: 'new-time', permissions: ['time.own', 'time.manage'] }, render: renderTime },
   reports: { title: 'Berichte', sub: 'Montageberichte, Material und Fotos', primary: { label: 'Neuer Bericht', action: 'new-report', permission: 'reports.own' }, render: renderReports },
   orders: { title: 'Aufträge & Angebote', sub: 'Aufträge planen, bearbeiten und abrechnen', primary: { label: 'Neuer Auftrag', action: 'new-order', permission: 'orders.manage' }, render: renderOrders },
-  planning: { title: 'Einsatzplanung', sub: 'Wochenplan der Monteure', primary: { label: 'Termin anlegen', action: 'new-appointment', permission: 'planning.manage' }, render: renderPlanning },
+  planning: { title: 'Einsatzplanung / Kalender', sub: 'Wochenplan für Monteure, Büro und Chef', primary: { label: 'Termin anlegen', action: 'new-appointment', permission: 'planning.manage' }, render: renderPlanning },
   customers: { title: 'Kunden & Objekte', sub: 'Stammdaten und Historie', primary: { label: 'Neuer Kunde', action: 'new-customer', permission: 'customers.manage' }, render: renderCustomers },
   invoices: { title: 'Rechnungen', sub: 'Rechnungen, Zahlungen und Mahnwesen', primary: { label: 'CSV-Export', action: 'export-invoices', permission: 'exports.run' }, render: renderInvoices },
   contracts: { title: 'Wartungsverträge', sub: 'Wiederkehrende Aufträge automatisch erzeugen', primary: { label: 'Neuer Vertrag', action: 'new-contract', permission: 'contracts.manage' }, render: renderContracts },
@@ -329,7 +346,7 @@ const PAGES = {
 };
 
 const PAGE_GUARDS = {
-  my: () => can('orders.view.own'),
+  my: () => canAny('dashboard.view', 'orders.view.own', 'planning.view'),
   time: () => canAny('time.own', 'time.view.all'),
   reports: () => canAny('reports.own', 'reports.view.all'),
   orders: () => canAny('orders.view.all', 'orders.view.own'),
@@ -712,11 +729,115 @@ function renderHrDashboard(data) {
 
 async function renderMyDay() {
   const data = await api.get('/api/dashboard');
-  if (!data.personal) {
-    view.innerHTML = `<div class="card"><div class="card-body pad"><div class="empty">${icon('user')}<div>Diese Ansicht ist für Monteure und Techniker gedacht.</div></div></div></div>`;
+  if (data.personal) {
+    renderTechnicianDashboard(data);
     return;
   }
-  renderTechnicianDashboard(data);
+  renderOfficeDay(await api.get('/api/my-day'));
+}
+
+function dayAppointmentRow(a) {
+  const customer = customerName(a);
+  const place = a.property_label || a.location
+    || (a.customer_street ? `${a.customer_street}${a.customer_city ? `, ${a.customer_city}` : ''}` : '');
+  const action = a.order_id
+    ? `data-action="open-order" data-id="${a.order_id}"`
+    : `data-action="open-appointment" data-id="${a.id}"`;
+  return `<div class="day-row" ${action}>
+    <div class="dr-time">${fmtTime(a.start_at)}<small>${fmtTime(a.end_at)}</small></div>
+    <div class="dr-main">
+      <div class="dr-title">${esc(a.title)}</div>
+      <div class="dr-sub">
+        ${kindChip(a.kind)}
+        ${customer ? `<span>${esc(customer)}</span>` : ''}
+        ${place ? `<span>· ${esc(place)}</span>` : ''}
+        ${a.order_number ? `<span>· ${esc(a.order_number)}</span>` : ''}
+      </div>
+    </div>
+    ${a.confirmed_at ? '<span class="badge erledigt">bestätigt</span>' : a.declined_at ? '<span class="badge storniert">abgelehnt</span>' : ''}
+  </div>`;
+}
+
+/** Tagesansicht für Büro, Vorgesetzte, HR und Chef: eigene Termine + Kennzahlen. */
+function renderOfficeDay(day) {
+  const manage = can('planning.manage');
+  const today = new Date(`${day.today}T12:00:00`);
+  const headline = today.toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+  const k = day.kpis || {};
+  const upcoming = day.upcoming || [];
+  const grouped = new Map();
+  upcoming.forEach((a) => {
+    const key = toDateInput(a.start_at);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(a);
+  });
+
+  const kpi = (label, value, foot, page, ico, tone = '') => `
+    <div class="kpi link ${tone}" data-action="goto" data-page="${page}">
+      <div class="ico">${icon(ico)}</div>
+      <div class="label">${label}</div>
+      <div class="value">${value}</div>
+      <div class="foot">${foot}</div>
+    </div>`;
+
+  view.innerHTML = `
+    <div class="section-head">
+      <div>
+        <h2>Guten Tag, ${esc((state.user?.name || '').split(' ')[0] || '')}</h2>
+        <div class="sub">${headline}${day.employee ? ` · ${esc(day.employee.name)}` : ''}</div>
+      </div>
+      ${manage ? `<button class="btn sm" type="button" data-action="new-appointment">${icon('plus')} Termin anlegen</button>` : ''}
+    </div>
+
+    <div class="kpi-grid tight">
+      ${kpi('Meine Termine heute', day.appointments.length,
+        day.appointments.length ? `nächster um ${fmtTime(day.appointments[0].start_at)}` : 'noch nichts geplant',
+        'planning', 'calendar')}
+      ${k.openOrders ? kpi('Offene Aufträge', k.openOrders, 'neu, geplant oder in Arbeit', 'orders', 'receipt') : ''}
+      ${k.reportsToApprove ? kpi('Berichte zur Freigabe', k.reportsToApprove, 'warten auf Prüfung', 'reports', 'file', 'amber') : ''}
+      ${k.overdueInvoices ? kpi('Überfällige Rechnungen', k.overdueInvoices, 'Zahlungsziel überschritten', 'invoices', 'euro', 'red') : ''}
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Meine Termine heute</h2><div class="sub">${day.appointments.length} ${day.appointments.length === 1 ? 'Eintrag' : 'Einträge'}</div></div>
+        </div>
+        <div class="card-body">
+          ${day.appointments.length ? `<div class="day-list">${day.appointments.map(dayAppointmentRow).join('')}</div>`
+            : `<div class="empty">${icon('calendar')}<div>Keine Termine für heute</div>
+              ${manage ? '<div class="small" style="margin-top:8px"><button class="btn sm" data-action="new-appointment">Termin anlegen</button></div>' : ''}</div>`}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Die nächsten Tage</h2><div class="sub">Eigene Termine der nächsten zwei Wochen</div></div>
+          <a class="btn sm" href="#/planning">Kalender ${icon('arrow')}</a>
+        </div>
+        <div class="card-body">
+          ${upcoming.length ? [...grouped.entries()].map(([key, rows]) => `
+            <div class="upcoming-day">
+              <div class="upcoming-date">${fmtDate(key)}</div>
+              ${rows.map(dayAppointmentRow).join('')}
+            </div>`).join('') : '<div class="small muted">Keine weiteren Termine geplant.</div>'}
+        </div>
+      </div>
+    </div>
+
+    ${day.teamToday?.length ? `<div class="card">
+      <div class="card-head"><div><h2>Team heute</h2><div class="sub">Wer ist im Einsatz</div></div></div>
+      <div class="card-body">
+        <div class="team-day">
+          ${day.teamToday.map((employee) => `<div class="team-day-item">
+            <span class="legend-dot" style="background:${esc(employee.color || '#0f4c5c')}"></span>
+            <span class="strong">${esc(employee.name)}</span>
+            <span class="muted small">${employee.appointments ? `${employee.appointments} ${employee.appointments === 1 ? 'Termin' : 'Termine'}` : 'frei'}</span>
+          </div>`).join('')}
+        </div>
+      </div>
+    </div>` : ''}
+  `;
 }
 
 let liveClockTimer = null;
@@ -1923,8 +2044,11 @@ async function renderPlanning() {
   const appointments = await api.get(`/api/appointments?from=${from}&to=${to}`);
   const term = state.search.toLowerCase();
   const visible = term
-    ? appointments.filter((a) => `${a.title} ${a.order_number || ''} ${customerName(a)} ${a.employee_name || ''}`.toLowerCase().includes(term))
+    ? appointments.filter((a) => `${a.title} ${a.order_number || ''} ${customerName(a)} ${a.employee_name || ''} ${kindLabel(a.kind)}`.toLowerCase().includes(term))
     : appointments;
+  const kindFilter = state.planningKind || 'alle';
+  const kindsPresent = [...new Set(visible.map((a) => a.kind || 'baustelle'))];
+  const shown = kindFilter === 'alle' ? visible : visible.filter((a) => (a.kind || 'baustelle') === kindFilter);
 
   const days = [...Array(7)].map((_, index) => {
     const date = new Date(start);
@@ -1935,11 +2059,23 @@ async function renderPlanning() {
   const todayKey = todayISO();
 
   view.innerHTML = `
+    <div class="toolbar">
+      <div class="chips">
+        <button class="chip ${kindFilter === 'alle' ? 'active' : ''}" data-action="filter-appointments" data-kind="alle">
+          Alle <span class="count">${visible.length}</span>
+        </button>
+        ${kindsPresent.map((kind) => `
+          <button class="chip ${kindFilter === kind ? 'active' : ''}" data-action="filter-appointments" data-kind="${kind}">
+            <span class="kind-dot" style="background:${kindInfo(kind).color}"></span>${esc(kindInfo(kind).label.split(' / ')[0])}
+            <span class="count">${visible.filter((a) => (a.kind || 'baustelle') === kind).length}</span>
+          </button>`).join('')}
+      </div>
+    </div>
     <div class="card">
       <div class="card-head">
         <div>
           <h2>${start.toLocaleDateString('de-DE', { day: '2-digit', month: 'long' })} – ${end.toLocaleDateString('de-DE', { day: '2-digit', month: 'long', year: 'numeric' })}</h2>
-          <div class="sub">${visible.length} ${visible.length === 1 ? 'Termin' : 'Termine'} in dieser Woche</div>
+          <div class="sub">${shown.length} ${shown.length === 1 ? 'Termin' : 'Termine'} in dieser Woche</div>
         </div>
         <div class="right">
           <button class="btn sm" data-action="week-prev">‹</button>
@@ -1962,7 +2098,7 @@ async function renderPlanning() {
           </div>
           ${days.map((date) => {
             const key = toDateInput(date);
-            const dayEvents = visible.filter((a) => toDateInput(a.start_at) === key);
+            const dayEvents = shown.filter((a) => toDateInput(a.start_at) === key);
             return `<div class="cal-day ${key === todayKey ? 'today' : ''}" data-date="${key}">
               ${hours.map(() => '<div class="slot"></div>').join('')}
               ${dayEvents.map((event) => {
@@ -1973,9 +2109,10 @@ async function renderPlanning() {
                 const top = ((startMinutes - 7 * 60) / 60) * 52;
                 const height = Math.max(26, ((endMinutes - startMinutes) / 60) * 52);
                 const color = event.employee_color || '#0f4c5c';
+                const info = kindInfo(event.kind);
                 return `<div class="event" style="top:${top}px;height:${height}px;border-left-color:${color};background:${color}18;color:${color}"
-                  data-action="open-appointment" data-id="${event.id}" data-order="${event.order_id || ''}" title="${esc(event.title)}">
-                  <div class="e-time">${fmtTime(event.start_at)}–${fmtTime(event.end_at)}</div>
+                  data-action="open-appointment" data-id="${event.id}" data-order="${event.order_id || ''}" title="${esc(event.title)} · ${esc(info.label)}">
+                  <div class="e-time"><span class="e-kdot" style="background:${info.color}"></span>${fmtTime(event.start_at)}–${fmtTime(event.end_at)}</div>
                   <div class="e-title">${esc(event.order_title || event.title)}</div>
                   <div class="e-sub">${esc(customerName(event))}</div>
                   <div class="e-sub">${esc(event.employee_name || '')}</div>
@@ -2015,35 +2152,46 @@ async function renderPlanning() {
 
 function appointmentForm(appointment = null, preset = {}) {
   const date = preset.date || todayISO();
+  const kindOptions = Object.entries(APPOINTMENT_KINDS).map(([value, info]) => ({ value, label: info.label }));
+  const customerOptions = (state.customers || []).map((customer) => ({ value: customer.id, label: customerFull(customer) }));
   const openForm = (orderOptions) => formModal({
     title: appointment ? 'Termin bearbeiten' : 'Neuer Termin',
     subtitle: appointment ? `${fmtDate(appointment.start_at)} · ${fmtTime(appointment.start_at)}` : 'Termin für einen Auftrag oder frei planen',
     fields: [
-      { name: 'title', label: 'Titel', required: true, full: true, default: preset.title || '' },
+      { name: 'kind', label: 'Terminart', type: 'select', options: kindOptions, default: 'baustelle' },
+      { name: 'employee_id', label: 'Mitarbeiter', type: 'select', placeholder: 'Nicht zugewiesen', options: state.employees.filter((e) => e.active).map((e) => ({ value: e.id, label: e.name })) },
+      { name: 'title', label: 'Titel', required: true, full: true, default: preset.title || '', placeholder: 'z. B. Kundenbesuch Angebot, Meeting Büro, Baustelle' },
       { name: 'order_id', label: 'Auftrag', type: 'select', placeholder: 'Ohne Auftrag', options: orderOptions },
-      { name: 'employee_id', label: 'Monteur', type: 'select', placeholder: 'Nicht zugewiesen', options: state.employees.filter((e) => e.active).map((e) => ({ value: e.id, label: e.name })) },
+      { name: 'customer_id', label: 'Kunde', type: 'select', placeholder: 'Ohne Kunde', options: customerOptions },
+      { name: 'location', label: 'Ort', placeholder: 'z. B. Büro, Werkstatt, beim Kunden' },
       { name: 'date', label: 'Datum', type: 'date', required: true, default: date },
       { name: 'start_time', label: 'Beginn', type: 'text', default: preset.time || '08:00', placeholder: '08:00' },
       { name: 'end_time', label: 'Ende', type: 'text', default: preset.endTime || '10:00', placeholder: '10:00' },
       { name: 'notes', label: 'Notiz', type: 'textarea', full: true, rows: 2 },
     ],
     values: appointment ? {
+      kind: appointment.kind || 'baustelle',
       title: appointment.title,
       order_id: appointment.order_id ?? '',
+      customer_id: appointment.customer_id ?? '',
       employee_id: appointment.employee_id ?? '',
+      location: appointment.location || '',
       date: toDateInput(appointment.start_at),
       start_time: fmtTime(appointment.start_at),
       end_time: fmtTime(appointment.end_at),
       notes: appointment.notes,
-    } : {},
+    } : { kind: preset.kind || 'baustelle' },
     submitLabel: 'Speichern',
     onSubmit: async (data) => {
       const start_at = new Date(`${data.date}T${data.start_time || '08:00'}`).toISOString();
       const end_at = new Date(`${data.date}T${data.end_time || '10:00'}`).toISOString();
       const payload = {
+        kind: data.kind,
         title: data.title,
         order_id: data.order_id || null,
+        customer_id: data.customer_id || null,
         employee_id: data.employee_id || null,
+        location: data.location,
         start_at,
         end_at,
         notes: data.notes,
@@ -3371,6 +3519,7 @@ const ACTIONS = {
   'filter-orders': (id, el) => { state.ordersFilter = el.dataset.filter; renderOrders(); },
   'filter-invoices': (id, el) => { state.invoicesFilter = el.dataset.filter; renderInvoices(); },
   'filter-customers': (id, el) => { state.customersFilter = el.dataset.filter; renderCustomers(); },
+  'filter-appointments': (id, el) => { state.planningKind = el.dataset.kind; renderPlanning(); },
   'filter-warehouse': (id, el) => { state.warehouseFilter = el.dataset.filter; renderWarehouse(); },
   'filter-contracts': (id, el) => { state.contractsFilter = el.dataset.filter; renderContracts(); },
   'open-order': (id) => openOrder(id),
@@ -3875,20 +4024,20 @@ function buildBottomNav() {
   const nav = $('#bottom-nav');
   if (!nav) return;
   const all = {
-    my: { page: 'my', label: 'Mein Tag', ico: 'clock', show: can('orders.view.own') },
+    my: { page: 'my', label: 'Mein Tag', ico: 'clock', show: canAny('dashboard.view', 'orders.view.own', 'planning.view') },
     dashboard: { page: 'dashboard', label: 'Übersicht', ico: 'dashboard', show: can('dashboard.view') },
     orders: { page: 'orders', label: 'Aufträge', ico: 'receipt', show: canAny('orders.view.all', 'orders.view.own') },
     reports: { page: 'reports', label: 'Berichte', ico: 'file', show: canAny('reports.own', 'reports.view.all') },
     time: { page: 'time', label: 'Zeiten', ico: 'clock', show: canAny('time.own', 'time.view.all') },
     team: { page: 'team', label: 'Team', ico: 'users', show: can('employees.view') },
     invoices: { page: 'invoices', label: 'Rechnungen', ico: 'euro', show: can('invoices.view') },
-    planning: { page: 'planning', label: 'Planung', ico: 'calendar', show: can('planning.view') },
+    planning: { page: 'planning', label: 'Kalender', ico: 'calendar', show: can('planning.view') },
   };
   const order = isTechnician()
     ? ['my', 'orders', 'reports', 'time', 'dashboard']
     : can('invoices.view')
-      ? ['dashboard', 'orders', 'invoices', 'planning', 'reports', 'team']
-      : ['dashboard', 'team', 'reports', 'time', 'orders'];
+      ? ['my', 'dashboard', 'orders', 'planning', 'invoices', 'reports', 'team']
+      : ['my', 'dashboard', 'team', 'reports', 'time', 'orders'];
   const visible = order.map((key) => all[key]).filter((option) => option && option.show).slice(0, 4);
   nav.innerHTML = `
     ${visible.map((option) => `
