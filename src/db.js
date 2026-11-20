@@ -85,7 +85,17 @@ CREATE TABLE IF NOT EXISTS articles (
   stock          REAL NOT NULL DEFAULT 0,
   min_stock      REAL NOT NULL DEFAULT 0,
   supplier       TEXT,
-  active         INTEGER NOT NULL DEFAULT 1
+  active         INTEGER NOT NULL DEFAULT 1,
+  gtin               TEXT,
+  manufacturer       TEXT,
+  manufacturer_number TEXT,
+  etim_class         TEXT,
+  datasheet_url      TEXT,
+  image_url          TEXT,
+  source             TEXT,
+  source_id          TEXT,
+  price_unit         TEXT,
+  last_sync_at       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS contracts (
@@ -189,6 +199,22 @@ CREATE TABLE IF NOT EXISTS payments (
   method     TEXT DEFAULT 'Überweisung',
   note       TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS catalog_imports (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  source      TEXT NOT NULL,
+  supplier    TEXT,
+  filename    TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  user_id     INTEGER,
+  total       INTEGER NOT NULL DEFAULT 0,
+  created     INTEGER NOT NULL DEFAULT 0,
+  updated     INTEGER NOT NULL DEFAULT 0,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  errors      INTEGER NOT NULL DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'ok',
+  details     TEXT DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS stock_movements (
@@ -301,6 +327,7 @@ CREATE INDEX IF NOT EXISTS idx_time_order ON time_entries(order_id);
 CREATE INDEX IF NOT EXISTS idx_reports_order ON reports(order_id);
 CREATE INDEX IF NOT EXISTS idx_reports_employee ON reports(employee_id);
 CREATE INDEX IF NOT EXISTS idx_photos_order ON photos(order_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_imports_created ON catalog_imports(created_at);
 `;
 
 db.exec(SCHEMA);
@@ -324,6 +351,19 @@ ensureColumn('appointments', 'customer_id', 'INTEGER');
 ensureColumn('appointments', 'location', 'TEXT');
 ensureColumn('appointments', 'mail_sent_at', 'TEXT');
 ensureColumn('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('articles', 'gtin', 'TEXT');
+ensureColumn('articles', 'manufacturer', 'TEXT');
+ensureColumn('articles', 'manufacturer_number', 'TEXT');
+ensureColumn('articles', 'etim_class', 'TEXT');
+ensureColumn('articles', 'datasheet_url', 'TEXT');
+ensureColumn('articles', 'image_url', 'TEXT');
+ensureColumn('articles', 'source', 'TEXT');
+ensureColumn('articles', 'source_id', 'TEXT');
+ensureColumn('articles', 'price_unit', 'TEXT');
+ensureColumn('articles', 'last_sync_at', 'TEXT');
+// Index erst nach der Migration: bestehende Datenbanken haben die Spalte noch nicht.
+db.exec('CREATE INDEX IF NOT EXISTS idx_articles_gtin ON articles(gtin);');
+
 // Sitzungen aus der Zeit vor der Token-Hashing-Umstellung sind ungültig.
 db.exec("DELETE FROM sessions WHERE length(id) != 64;");
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_token
@@ -374,6 +414,57 @@ export const DEFAULT_SETTINGS = {
   dunning_days: '30',
   dunning_fee: '5',
   small_business: '0',
+
+  // Material & Datenquellen – alles optional, standardmäßig aus.
+  mat_markup_default: '30',
+  mat_import_update_prices: '1',
+  mat_import_keep_sale_price: '1',
+  mat_import_update_stock: '0',
+  mat_allow_http: '0',
+  mat_datanorm_enabled: '0',
+  mat_datanorm_supplier: '',
+  mat_bmecat_enabled: '0',
+  mat_bmecat_supplier: '',
+  mat_csv_enabled: '0',
+  mat_csv_supplier: '',
+  mat_csv_delimiter: ';',
+  mat_icecat_enabled: '0',
+  mat_icecat_shopname: 'openicecat-live',
+  mat_icecat_api_token: '',
+  mat_icecat_content_token: '',
+  mat_icecat_lang: 'DE',
+  mat_etim_enabled: '0',
+  mat_etim_client_id: '',
+  mat_etim_client_secret: '',
+  mat_etim_language: 'de-DE',
+  mat_upcitemdb_enabled: '0',
+  mat_upcitemdb_key: '',
+  mat_upcitemdb_trial: '1',
+  mat_gs1_enabled: '1',
+  mat_dealer_enabled: '0',
+  mat_dealer_name: '',
+  mat_dealer_base_url: '',
+  mat_dealer_auth_type: 'none',
+  mat_dealer_auth_user: '',
+  mat_dealer_auth_secret: '',
+  mat_dealer_auth_header: 'X-API-Key',
+  mat_dealer_search_path: '/api/articles?q={query}',
+  mat_dealer_article_path: '/api/articles/{article}',
+  mat_dealer_results_path: '',
+  mat_dealer_map_number: 'number',
+  mat_dealer_map_name: 'name',
+  mat_dealer_map_price: 'purchase_price',
+  mat_dealer_map_currency: 'currency',
+  mat_dealer_map_unit: 'unit',
+  mat_dealer_map_manufacturer: 'manufacturer',
+  mat_dealer_map_gtin: 'gtin',
+  mat_dealer_map_stock: 'stock',
+  mat_dealer_map_datasheet: 'datasheet_url',
+  mat_dealer_map_image: 'image_url',
+  mat_ids_enabled: '0',
+  mat_ids_shop_url: '',
+  mat_ids_supplier: '',
+  mat_ids_search_path: '/search?q={article}',
 };
 
 export function getSettings() {

@@ -49,6 +49,7 @@ Passwort. Bestehende Datenbanken behalten ihre Passwörter (Sicherheitskarte zei
 | `src/permissions.js` | Rollen und Rechte-Matrix – **einzige Wahrheit** |
 | `src/auth.js`, `src/password.js` | Sessions (`hp_session`-Cookie), scrypt |
 | `src/work.js` | Materialparser, Foto-Speicherung, Zeiterfassung |
+| `src/materials.js` | Katalogimporte (Datanorm 4, BMEcat, CSV), Icecat/ETIM/UPCitemdb/Händler-API, GTIN |
 | `src/mail.js` | SMTP-Versand ohne Abhängigkeiten (TLS, STARTTLS, AUTH) |
 | `src/billing.js`, `src/automation.js` | Rechnungen, Automatik-Läufe |
 | `src/documents.js`, `src/pdf.js` | Dokumente und eigener PDF-Generator |
@@ -84,7 +85,8 @@ Passwort. Bestehende Datenbanken behalten ihre Passwörter (Sicherheitskarte zei
    „abbrechen" oder zum Tippen zwingen; Diktat schreibt in das aktive Feld.
 8. **Keine Secrets, keine echten Daten** in Code, Tests, Beispielen oder Commit-Messages.
 9. **Keine Geheimnisse in API-Antworten.** Einstellungen je Rolle über `settingsForUser(...)`
-   ausliefern; SMTP-Passwörter nur maskiert, Bankdaten nur mit `invoices.view`.
+   ausliefern; SMTP- und Material-Zugangsdaten nur maskiert (`********`), Bankdaten nur mit
+   `invoices.view`, `mat_*`-Einstellungen nur mit `settings.manage`.
 10. **Eingaben escapen.** HTML nur über `esc(...)` (Frontend) bzw. `escHtml(...)` (E-Mail);
    Attributwerte und Links mitdenken. Neue öffentliche Seiten brauchen dieselben Regeln.
 11. **Server bleibt erreichbar.** Anfragen dürfen nie zu einem unbehandelten Fehler führen:

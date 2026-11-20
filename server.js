@@ -137,8 +137,10 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    // Katalogimporte enthalten die Dateien als Base64 und dürfen größer sein.
+    const bodyLimit = url.pathname === '/api/materials/import' ? 100 * 1024 * 1024 : undefined;
     try {
-      req.body = await readBody(req);
+      req.body = await readBody(req, bodyLimit);
     } catch (error) {
       sendError(res, error.status || 400, error.message || 'Ungültige Anfrage');
       return;

@@ -16,6 +16,7 @@ const { runAutomation } = await import('../src/automation.js');
 const { verifyPassword } = await import('../src/password.js');
 const { permissionsFor, can } = await import('../src/permissions.js');
 const { parseMaterials } = await import('../src/work.js');
+const materials = await import('../src/materials.js');
 
 const invoiceCount = () => db.prepare('SELECT COUNT(*) AS n FROM invoices').get().n;
 
@@ -64,6 +65,83 @@ test('Materialparser erkennt Mengen, Einheiten und Artikel', () => {
   assert.equal(spoken.length, 1);
   assert.equal(spoken[0].quantity, 2);
   assert.equal(spoken[0].unit, 'Stk');
+});
+
+test('GTIN-Prüfung erkennt gültige und ungültige Prüfziffern', () => {
+  assert.equal(materials.gtinChecksumValid('4006381333931'), true);
+  assert.equal(materials.gtinChecksumValid('4006381333932'), false);
+  assert.equal(materials.gtinChecksumValid('1234'), false);
+  assert.equal(materials.normalizeGtin('4 006381 333931'), '4006381333931');
+  assert.equal(materials.gtinInfo('4006381333931').valid, true);
+  assert.match(materials.gtinInfo('4006381333931').gs1Url, /verified-by-gs1/);
+});
+
+test('Datanorm 4 wird mit Preisen, EAN und Warengruppen gelesen', () => {
+  const file = [
+    `V 010125${'Muster Großhandel'.padEnd(40)}${'DATANORM'.padEnd(40)}${'Test'.padEnd(35)}04EUR`,
+    'A;VK;4711;00;Viega Pressfitting 15 mm;Sanpress;2;0;STK;1234;10;001; ;',
+    'B;VK;4711;VIE 123456; ; ;0;0;0;4012345678901; ;001; ; ;VIE; ;',
+    'S; ;001;Sanitär;0011;Fittings;',
+    'D;VK;4711;1; ;Zusätzlicher;Langtext;',
+    'P;VK;4711;2;900;1;1000;;;;;',
+  ].join('\r\n');
+  const parsed = materials.parseDatanorm([{ name: 'DATANORM.001', content: file }], { taxRate: 19 });
+  assert.equal(parsed.items.length, 1);
+  const item = parsed.items[0];
+  assert.equal(item.number, '4711');
+  assert.equal(item.name, 'Viega Pressfitting 15 mm Sanpress');
+  assert.equal(item.unit, 'Stk');
+  assert.equal(item.purchasePrice, 8.1, 'P-Satz: 9,00 € minus 10 % Rabatt');
+  assert.equal(item.gtin, '4012345678901');
+  assert.equal(item.manufacturer, 'VIE');
+  assert.equal(item.category, 'Sanitär');
+  assert.equal(parsed.meta.version, 4);
+  assert.equal(parsed.meta.currency, 'EUR');
+});
+
+test('Datanorm dekodiert klassische CP850-Umlaute', () => {
+  const v = `V 010125${'Firma'.padEnd(40)}${'DATANORM'.padEnd(40)}${''.padEnd(35)}04EUR`;
+  const file = Buffer.concat([
+    Buffer.from(`${v}\r\nA;VK;850;00;Test m`, 'latin1'),
+    Buffer.from([0x94]), // CP850: ö
+    Buffer.from('glich;Kurz;2;0;STK;100;;;\r\n', 'latin1'),
+  ]);
+  const parsed = materials.parseDatanorm([{ name: 'DATANORM.001', base64: file.toString('base64') }], { taxRate: 19 });
+  assert.equal(parsed.items.length, 1);
+  assert.match(parsed.items[0].name, /möglich/);
+});
+
+test('BMEcat-XML und CSV werden tolerant gelesen', () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+    <BMECAT><HEADER><SUPPLIER_NAME>Muster AG</SUPPLIER_NAME></HEADER>
+      <T_PRODUCT><PRODUCT>
+        <SUPPLIER_AID>B-100</SUPPLIER_AID>
+        <DESCRIPTION_SHORT>Kupferrohr 15 mm</DESCRIPTION_SHORT>
+        <ORDER_UNIT>MTR</ORDER_UNIT>
+        <PRODUCT_PRICE_DETAILS><PRODUCT_PRICE>
+          <PRICE_AMOUNT>4.20</PRICE_AMOUNT><PRICE_CURRENCY>EUR</PRICE_CURRENCY>
+          <TAX>19</TAX><PRICE_QUANTITY>1</PRICE_QUANTITY>
+        </PRODUCT_PRICE></PRODUCT_PRICE_DETAILS>
+        <CLASSIFICATION><CLASSIFICATION_SYSTEM_NAME>ETIM</CLASSIFICATION_SYSTEM_NAME><CLASSIFICATION_ID>EC000001</CLASSIFICATION_ID></CLASSIFICATION>
+      </PRODUCT></T_PRODUCT>
+    </BMECAT>`;
+  const bmecat = materials.parseBmecat([{ name: 'katalog.xml', content: xml }], { taxRate: 19 });
+  assert.equal(bmecat.items.length, 1);
+  assert.equal(bmecat.items[0].number, 'B-100');
+  assert.equal(bmecat.items[0].unit, 'm');
+  assert.equal(bmecat.items[0].purchasePrice, 4.2);
+  assert.equal(bmecat.items[0].etimClass, 'EC000001');
+  assert.equal(bmecat.supplier, 'Muster AG');
+
+  const csv = 'Artikelnummer;Bezeichnung;Warengruppe;Einheit;EK;VK;EAN;Hersteller\n'
+    + '4712;Testrohr;Rohre;m;2,50;3,90;4012345678901;Muster';
+  const parsed = materials.parseCsv([{ name: 'liste.csv', content: csv }], { taxRate: 19, delimiter: ';' });
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0].number, '4712');
+  assert.equal(parsed.items[0].purchasePrice, 2.5);
+  assert.equal(parsed.items[0].salePrice, 3.9);
+  assert.equal(parsed.items[0].unit, 'm');
+  assert.equal(parsed.items[0].gtin, '4012345678901');
 });
 
 test('Rechnungssummen werden korrekt gerundet', () => {
@@ -688,6 +766,144 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     const exportedCsv = await (await call(chef.cookie, '/api/export/kunden.csv')).text();
     assert.ok(exportedCsv.includes(`\"'=cmd|/C calc!A0\"`), 'Formel wird als Text exportiert');
     await call(chef.cookie, `/api/customers/${csvCustomer.id}`, { method: 'DELETE' });
+
+    // ---------------------------------------------------------- Materialquellen
+    const sourceList = await json(await call(chef.cookie, '/api/materials/sources'));
+    assert.ok(sourceList.sources.length >= 9, 'Alle optionalen Materialquellen sind registriert');
+    assert.ok(sourceList.sources.every((source) => typeof source.enabled === 'boolean'));
+    assert.ok(sourceList.sources.some((source) => source.id === 'datanorm' && source.accept));
+    assert.ok(sourceList.sources.every((source) => Array.isArray(source.fields)));
+
+    // Zugangsdaten: Chef bekommt Platzhalter, andere Rollen gar keine Material-Keys.
+    await call(chef.cookie, '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mat_icecat_api_token: 'geheim-123', mat_csv_enabled: '1' }),
+    });
+    const chefSettings = (await json(await call(chef.cookie, '/api/settings'))).settings;
+    assert.equal(chefSettings.mat_icecat_api_token, '********');
+    await call(chef.cookie, '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mat_icecat_api_token: '********' }),
+    });
+    assert.equal(
+      db.prepare("SELECT value FROM settings WHERE key = 'mat_icecat_api_token'").get().value,
+      'geheim-123',
+      'Platzhalter überschreibt das gespeicherte Geheimnis nicht',
+    );
+    const bueroUser = await login('buero', 'buero123');
+    const bueroSettings = bueroUser.data.settings;
+    assert.equal(bueroSettings.mat_icecat_api_token, undefined);
+    assert.equal(bueroSettings.mat_csv_enabled, undefined);
+    const bueroSources = await json(await call(bueroUser.cookie, '/api/materials/sources'));
+    assert.ok(bueroSources.sources.length >= 9);
+    assert.equal(bueroSources.canManage, false);
+    assert.equal(bueroSources.sources[0].fields, undefined, 'Felddefinitionen nur für Einstellungs-Verwalter');
+
+    // Import nur mit Recht und nur für eingeschaltete Quellen.
+    const monteurUser = await login('monteur', 'monteur123');
+    assert.equal((await call(monteurUser.cookie, '/api/materials/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'csv', files: [] }),
+    })).status, 403);
+    const disabledImport = await call(chef.cookie, '/api/materials/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'datanorm', files: [{ name: 'x.001', content: 'A;VK;1;00;Test; ;2;0;STK;100;;;' }] }),
+    });
+    assert.equal(disabledImport.status, 400, 'Ausgeschaltete Quelle wird nicht importiert');
+
+    const csvImport = await json(await call(chef.cookie, '/api/materials/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: 'csv',
+        supplier: 'Muster AG',
+        files: [{
+          name: 'preise.csv',
+          content: 'Artikelnummer;Bezeichnung;Warengruppe;Einheit;EK;VK;EAN\nMAT-1;Testartikel;Rohre;Stk;10,00;15,00;4006381333931',
+        }],
+      }),
+    }));
+    assert.equal(csvImport.created, 1);
+    const imported = db.prepare("SELECT * FROM articles WHERE number = 'MAT-1'").get();
+    assert.ok(imported);
+    assert.equal(imported.purchase_price, 10);
+    assert.equal(imported.sale_price, 15);
+    assert.equal(imported.gtin, '4006381333931');
+    assert.equal(imported.supplier, 'Muster AG');
+
+    const secondImport = await json(await call(chef.cookie, '/api/materials/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: 'csv',
+        supplier: 'Muster AG',
+        files: [{
+          name: 'preise.csv',
+          content: 'Artikelnummer;Bezeichnung;Warengruppe;Einheit;EK;VK\nMAT-1;Testartikel;Rohre;Stk;11,00;19,00',
+        }],
+        options: { updatePrices: true, keepSalePrice: true },
+      }),
+    }));
+    assert.equal(secondImport.updated, 1);
+    const importedAgain = db.prepare("SELECT * FROM articles WHERE number = 'MAT-1'").get();
+    assert.equal(importedAgain.purchase_price, 11);
+    assert.equal(importedAgain.sale_price, 15, 'Gepflegter VK bleibt erhalten');
+
+    const history = await json(await call(chef.cookie, '/api/materials/imports?limit=5'));
+    assert.ok(history.length >= 2);
+    assert.ok(history.every((row) => Array.isArray(row.details)));
+
+    const gtinCheck = await json(await call(chef.cookie, '/api/materials/gtin/4006381333931'));
+    assert.equal(gtinCheck.valid, true);
+
+    // Ohne eingeschaltete Lookup-Quellen bleibt die Anreicherung folgenlos.
+    const enriched = await json(await call(chef.cookie, `/api/materials/articles/${imported.id}/enrich`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }));
+    assert.deepEqual(enriched.applied, []);
+
+    // Händler-Deep-Link nur mit eingeschaltetem Shop.
+    await call(chef.cookie, '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mat_ids_enabled: '1',
+        mat_ids_shop_url: 'https://shop.example.test',
+        mat_ids_search_path: '/search?q={article}',
+      }),
+    });
+    const deepLink = await json(await call(chef.cookie, `/api/materials/deep-link/${imported.id}`));
+    assert.match(deepLink.url, /^https:\/\/shop\.example\.test\/search\?q=/);
+    assert.ok(deepLink.url.includes('4006381333931'), 'Deep-Link nutzt GTIN, wenn vorhanden');
+    // SSRF-Schutz: private/HTTP-Ziele werden ohne bewusste Testfreigabe abgelehnt.
+    await call(chef.cookie, '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mat_dealer_enabled: '1',
+        mat_dealer_base_url: `http://127.0.0.1:${port}/api/dashboard`,
+        mat_dealer_search_path: '/',
+        mat_allow_http: '0',
+      }),
+    });
+    const blockedDealer = await call(chef.cookie, '/api/materials/sources/dealer/test', { method: 'POST' });
+    assert.equal(blockedDealer.status, 400, 'HTTP/private Ziele sind gesperrt');
+    assert.match((await blockedDealer.json()).error, /HTTPS|privates Netzwerk/);
+
+    await call(chef.cookie, '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mat_ids_enabled: '0', mat_csv_enabled: '0', mat_icecat_api_token: '',
+        mat_dealer_enabled: '0', mat_dealer_base_url: '', mat_allow_http: '0',
+      }),
+    });
 
     // ---------------------------------------------------------- Abmelden
     await call(chef.cookie, '/api/auth/logout', { method: 'POST' });

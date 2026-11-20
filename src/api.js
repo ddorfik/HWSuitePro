@@ -23,6 +23,10 @@ import {
   runningTime, startTime, stopTime,
 } from './work.js';
 import { sendMail, mailConfigured } from './mail.js';
+import {
+  materialSources, MATERIAL_SECRET_SETTINGS, importCatalog, testSource, lookupMaterial,
+  enrichArticle, catalogImportHistory, dealerDeepLink, gtinInfo,
+} from './materials.js';
 
 class HttpError extends Error {
   constructor(status, message, code = null) {
@@ -43,6 +47,7 @@ const num = (value, fallback = 0) => {
 };
 const str = (value) => (value == null ? '' : String(value).trim());
 const bool = (value) => (value === true || value === 1 || value === '1' || value === 'true' ? 1 : 0);
+const bodyBoolean = (value) => value === true || value === 1 || value === '1' || value === 'true' || value === 'on';
 const search = (value) => `%${str(value)}%`;
 
 /** Absolute Adresse für Links in E-Mails (optional über Einstellungen festgelegt). */
@@ -87,8 +92,14 @@ function settingsForUser(settings, user) {
   }
   if (!can(user, 'settings.manage')) {
     for (const key of MAIL_SETTINGS) delete visible[key];
+    for (const key of Object.keys(visible)) {
+      if (key.startsWith('mat_')) delete visible[key];
+    }
   } else {
     visible.smtp_password = visible.smtp_password ? '********' : '';
+    for (const key of MATERIAL_SECRET_SETTINGS) {
+      visible[key] = visible[key] ? '********' : '';
+    }
   }
   return visible;
 }
@@ -895,6 +906,9 @@ route('PUT', '/api/settings', (req) => {
   const patch = { ...(req.body ?? {}) };
   // Platzhalter aus dem Formular niemals als Passwort speichern
   if (patch.smtp_password === '********') delete patch.smtp_password;
+  for (const key of MATERIAL_SECRET_SETTINGS) {
+    if (patch[key] === '********') delete patch[key];
+  }
   return { settings: settingsForUser(setSettings(patch), req.user) };
 }, { permission: 'settings.manage' });
 
@@ -1182,6 +1196,15 @@ route('POST', '/api/articles', (req) => {
     min_stock: num(body.min_stock),
     supplier: str(body.supplier),
     active: bool(body.active ?? 1),
+    gtin: str(body.gtin),
+    manufacturer: str(body.manufacturer),
+    manufacturer_number: str(body.manufacturer_number),
+    etim_class: str(body.etim_class),
+    datasheet_url: str(body.datasheet_url),
+    image_url: str(body.image_url),
+    source: str(body.source),
+    source_id: str(body.source_id),
+    price_unit: str(body.price_unit),
   });
   if (num(body.stock) !== 0) {
     adjustStock(id, num(body.stock), 'Anfangsbestand');
@@ -1192,7 +1215,9 @@ route('POST', '/api/articles', (req) => {
 route('PUT', '/api/articles/:id', (req, res, params) => {
   const data = pick(req.body ?? {}, [
     'number', 'name', 'category', 'unit', 'purchase_price', 'sale_price',
-    'stock', 'min_stock', 'supplier', 'active',
+    'stock', 'min_stock', 'supplier', 'active', 'gtin', 'manufacturer',
+    'manufacturer_number', 'etim_class', 'datasheet_url', 'image_url',
+    'source', 'source_id', 'price_unit',
   ]);
   if ('active' in data) data.active = bool(data.active);
   updateRow('articles', params.id, data);
@@ -1217,6 +1242,73 @@ route('POST', '/api/articles/:id/stock', (req, res, params) => {
 
 route('GET', '/api/articles/:id/movements', (req, res, params) =>
   db.prepare('SELECT * FROM stock_movements WHERE article_id = ? ORDER BY id DESC LIMIT 50').all(params.id), { permission: 'warehouse.view' });
+
+// ----------------------------------------------------------------- Materialquellen
+route('GET', '/api/materials/sources', (req) => {
+  const withFields = can(req.user, 'settings.manage');
+  return {
+    sources: materialSources(getSettings(), { withFields }),
+    canManage: withFields,
+    allowHttp: withFields ? getSettings().mat_allow_http === '1' : undefined,
+  };
+}, { permissions: ['warehouse.view', 'settings.manage'] });
+
+route('POST', '/api/materials/sources/:id/test', async (req, res, params) => {
+  const result = await testSource(params.id);
+  logActivity('material', `Datenquelle ${params.id} getestet.`);
+  return result;
+}, { permission: 'settings.manage' });
+
+route('POST', '/api/materials/import', (req) => {
+  const body = req.body ?? {};
+  const files = Array.isArray(body.files) ? body.files : [];
+  return importCatalog({
+    source: str(body.source),
+    supplier: str(body.supplier),
+    files,
+    options: body.options && typeof body.options === 'object' ? body.options : {},
+    userId: req.user.id,
+  });
+}, { permission: 'warehouse.manage' });
+
+route('GET', '/api/materials/imports', (req, res, params, url) =>
+  catalogImportHistory(url.searchParams.get('limit')), { permission: 'warehouse.view' });
+
+route('POST', '/api/materials/lookup', async (req) => {
+  const body = req.body ?? {};
+  const result = await lookupMaterial({
+    gtin: str(body.gtin),
+    articleNumber: str(body.articleNumber),
+    manufacturer: str(body.manufacturer),
+    query: str(body.query),
+  });
+  if (!can(req.user, 'invoices.view')) {
+    result.results = result.results.map((entry) => {
+      const copy = { ...entry };
+      delete copy.purchasePrice;
+      return copy;
+    });
+  }
+  return result;
+}, { permission: 'warehouse.view' });
+
+route('POST', '/api/materials/articles/:id/enrich', async (req, res, params) => {
+  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(params.id);
+  if (!article) throw new HttpError(404, 'Artikel nicht gefunden');
+  const result = await enrichArticle(article, {
+    overwritePrice: can(req.user, 'invoices.manage') && bodyBoolean(req.body?.overwritePrice),
+  });
+  return result;
+}, { permission: 'warehouse.manage' });
+
+route('GET', '/api/materials/deep-link/:id', (req, res, params) => {
+  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(params.id);
+  if (!article) throw new HttpError(404, 'Artikel nicht gefunden');
+  return { url: dealerDeepLink(article), name: str(getSettings().mat_ids_supplier) };
+}, { permission: 'warehouse.view' });
+
+route('GET', '/api/materials/gtin/:value', (req, res, params) =>
+  gtinInfo(params.value), { permission: 'warehouse.view' });
 
 // ----------------------------------------------------------------- Wartungsverträge
 route('GET', '/api/contracts', () =>
@@ -2556,15 +2648,18 @@ export async function handleApi(req, res, url) {
   return false;
 }
 
-export function readBody(req) {
+export function readBody(req, limit = 16_000_000) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let size = 0;
     req.on('data', (chunk) => {
-      data += chunk;
-      if (data.length > 16_000_000) {
+      size += chunk.length;
+      if (size > limit) {
         reject(new HttpError(413, 'Anfrage zu groß'));
         req.destroy();
+        return;
       }
+      data += chunk;
     });
     req.on('end', () => {
       if (!data) return resolve({});
