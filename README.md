@@ -108,9 +108,11 @@ Es gibt vier Wege – alle führen zum selben Berichtseditor:
 4. **Sprache**: „Bericht" oder „Bericht für Müller" – wird der Auftrag gefunden, öffnet sich das
    Formular und das Mikrofon startet direkt für das Diktat.
 
-Im Formular kannst du den Text tippen oder auf **„Diktieren"** tippen und sprechen. Material wird beim
-Speichern automatisch aus dem Text erkannt; anschließend lassen sich im Bericht beliebig viele Fotos
-ergänzen.
+Im Formular kannst du den Text tippen oder auf **„Diktieren"** tippen und sprechen. Das Diktat bleibt
+aktiv und hängt jeden Satz an den Bericht an – auch nach Sprechpausen oder einem Gespräch mit dem
+Kunden. Ein erneuter Tipp auf das Mikrofon beendet die Aufnahme; der vorhandene Text wird nie
+überschrieben. Material wird beim Speichern automatisch aus dem Text erkannt; anschließend lassen
+sich im Bericht beliebig viele Fotos ergänzen.
 
 ---
 
@@ -278,6 +280,8 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 ### Einsatzplanung / Kalender
 
 - Wochen- **und Monatsansicht**, farblich je Monteur, mit Filter-Chips nach Terminart
+- **Urlaub und Abwesenheiten** sind in allen drei Ansichten sichtbar – genehmigt und beantragt
+  (beantragt gestrichelt/orange), abgelehnt wird ausgeblendet
 - **Plantafel** als dritte Ansicht: Mitarbeiter, Abwesenheiten und Ressourcen (Fahrzeuge,
   Werkzeuge, Maschinen) auf einen Blick – mit Kapazitätsprüfung und Konflikterkennung
 - **Terminarten**: Baustelle, Kundenbesuch, Meeting, Personal/HR, Notdienst, Fortbildung,

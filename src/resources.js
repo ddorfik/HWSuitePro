@@ -1,4 +1,5 @@
 import { db, addDays, todayISO } from './db.js';
+import { ABSENCE_STATUS, ABSENCE_TYPES } from './hr.js';
 
 export const RESOURCE_TYPES = {
   fahrzeug: 'Fahrzeug',
@@ -140,11 +141,15 @@ export function planningBoard({ from = '', to = '' } = {}) {
     'SELECT id, name, role, color, weekly_hours, active FROM employees WHERE active = 1 ORDER BY name'
   ).all();
   const absences = db.prepare(
-    `SELECT a.*, e.name AS employee_name FROM absences a
+    `SELECT a.*, e.name AS employee_name, e.color AS employee_color FROM absences a
      JOIN employees e ON e.id = a.employee_id
-     WHERE a.status = 'genehmigt' AND a.start_date <= ? AND a.end_date >= ?
-     ORDER BY a.start_date`
-  ).all(end, start);
+     WHERE a.status IN ('beantragt', 'genehmigt') AND a.start_date <= ? AND a.end_date >= ?
+     ORDER BY a.status DESC, a.start_date`
+  ).all(end, start).map((row) => ({
+    ...row,
+    type_label: ABSENCE_TYPES[row.type] || row.type,
+    status_label: ABSENCE_STATUS[row.status] || row.status,
+  }));
   const appointments = db.prepare(
     `SELECT a.*, e.name AS employee_name, e.color AS employee_color,
        o.number AS order_number, o.title AS order_title, c.company, c.first_name, c.last_name,

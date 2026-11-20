@@ -25,6 +25,7 @@ const finance = await import('../src/finance.js');
 const site = await import('../src/site.js');
 const inventory = await import('../src/inventory.js');
 const interfaces = await import('../src/interfaces.js');
+const resources = await import('../src/resources.js');
 
 const invoiceCount = () => db.prepare('SELECT COUNT(*) AS n FROM invoices').get().n;
 
@@ -1034,6 +1035,33 @@ test('Personal: Urlaubsantrag, Resturlaub und Arbeitszeitkonto', () => {
   assert.equal(overtime.weeks[0].adjustment, 90);
   assert.equal(typeof overtime.balance_hours, 'number');
   assert.ok(hr.hrOverview(2026).length >= 1);
+});
+
+test('Plantafel zeigt beantragten und genehmigten Urlaub', () => {
+  const employee = db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY id LIMIT 1').get();
+  const pending = hr.createAbsence({
+    employee_id: employee.id,
+    type: 'urlaub',
+    start_date: '2026-12-05',
+    end_date: '2026-12-06',
+  }, 1);
+  assert.equal(pending.status, 'beantragt');
+  const approved = hr.createAbsence({
+    employee_id: employee.id,
+    type: 'urlaub',
+    start_date: '2026-12-09',
+    end_date: '2026-12-09',
+    status: 'genehmigt',
+  }, 1);
+  assert.equal(approved.status, 'genehmigt');
+
+  const board = resources.planningBoard({ from: '2026-12-01', to: '2026-12-10' });
+  const shown = board.absences.find((row) => row.id === pending.id);
+  assert.ok(shown, 'Beantragter Urlaub erscheint auf der Plantafel');
+  assert.equal(shown.type_label, 'Urlaub');
+  assert.equal(shown.status_label, 'Beantragt');
+  assert.ok(board.absences.some((row) => row.id === approved.id), 'Genehmigter Urlaub erscheint ebenfalls');
+  assert.ok(board.absences.every((row) => row.status !== 'abgelehnt'), 'Abgelehnter Urlaub wird ausgeblendet');
 });
 
 test('Finanzen: Bankimport mit Duplikatfilter, DATEV, IBAN und SEPA', () => {

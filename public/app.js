@@ -32,6 +32,7 @@ const state = {
   currentOrderId: null,
   currentReportId: null,
   voice: null,
+  dictation: null,
   loading: false,
 };
 
@@ -256,6 +257,10 @@ function openModal({ title, subtitle = '', body, footer = '', size = '', dismiss
 }
 
 function closeModal() {
+  if (state.dictation) {
+    state.dictation.stop();
+    state.dictation = null;
+  }
   $('#modal-root').innerHTML = '';
   document.body.style.overflow = '';
 }
@@ -316,7 +321,8 @@ function formModal({ title, subtitle, fields, values = {}, submitLabel = 'Speich
       const target = form.elements[button.dataset.dictate];
       const status = $(`[data-dictate-status="${button.dataset.dictate}"]`, form);
       if (!target) return;
-      if (target.value.trim()) target.value = `${target.value.trimEnd()} `;
+      const active = state.dictation && state.dictation.textarea === target;
+      if (!active && target.value.trim()) target.value = `${target.value.trimEnd()} `;
       listenInline(target, status);
     });
   });
@@ -2441,6 +2447,21 @@ async function renderPlanning() {
   const appointments = board
     ? board.appointments
     : await api.get(`/api/appointments?from=${toDateInput(start)}&to=${toDateInput(end)}`);
+  // Urlaub und Abwesenheiten auch in Wochen-/Monatsansicht anzeigen.
+  let absenceRows = board ? board.absences : [];
+  if (!board && can('employees.view')) {
+    try {
+      const data = await api.get(`/api/absences?from=${toDateInput(start)}&to=${toDateInput(end)}`);
+      absenceRows = (data.absences || []).filter((row) => row.status !== 'abgelehnt');
+    } catch { absenceRows = []; }
+  }
+  const absencesForDay = (key) => absenceRows.filter((row) => row.start_date <= key && row.end_date >= key);
+  const absenceLabel = (row) => `${row.type_label || (row.type === 'urlaub' ? 'Urlaub' : 'Abwesend')}${row.status === 'beantragt' ? ' (beantragt)' : ''}`;
+  const absenceDayLabel = (row) => {
+    const short = String(row.employee_name || '').trim().split(/\s+/)[0];
+    return short ? `${short} · ${absenceLabel(row)}` : absenceLabel(row);
+  };
+  const absenceTitle = (row) => `${row.type_label || 'Abwesend'} · ${row.employee_name || ''} · ${row.status_label || row.status}`.replace(/\s+/g, ' ').trim();
   const term = state.search.toLowerCase();
   const visible = term
     ? appointments.filter((a) => `${a.title} ${a.order_number || ''} ${customerName(a)} ${a.employee_name || ''} ${kindLabel(a.kind)}`.toLowerCase().includes(term))
@@ -2486,9 +2507,11 @@ async function renderPlanning() {
         <div class="cal-head"></div>
         ${days.map((date) => {
           const key = toDateInput(date);
+          const dayAbsences = absencesForDay(key);
           return `<div class="cal-head-cell ${key === todayKey ? 'today' : ''}">
             <div class="dow">${date.toLocaleDateString('de-DE', { weekday: 'short' })}</div>
             <div class="day">${date.getDate()}</div>
+            ${dayAbsences.map((row) => `<div class="cal-absence ${row.status === 'beantragt' ? 'pending' : ''}" title="${esc(absenceTitle(row))}">${esc(absenceDayLabel(row))}</div>`).join('')}
           </div>`;
         }).join('')}
         <div class="cal-times">
@@ -2497,7 +2520,7 @@ async function renderPlanning() {
         ${days.map((date) => {
           const key = toDateInput(date);
           const dayEvents = shown.filter((a) => toDateInput(a.start_at) === key);
-          return `<div class="cal-day ${key === todayKey ? 'today' : ''}" data-date="${key}">
+          return `<div class="cal-day ${key === todayKey ? 'today' : ''} ${absencesForDay(key).length ? 'has-absence' : ''}" data-date="${key}">
             ${hours.map(() => '<div class="slot"></div>').join('')}
             ${dayEvents.map(eventMarkup).join('')}
           </div>`;
@@ -2517,10 +2540,15 @@ async function renderPlanning() {
       ${monthDays.map((date) => {
         const key = toDateInput(date);
         const events = shown.filter((a) => toDateInput(a.start_at) === key);
+        const dayAbsences = absencesForDay(key);
         const otherMonth = date.getMonth() !== state.monthStart.getMonth();
         return `<div class="month-day ${otherMonth ? 'other' : ''} ${key === todayKey ? 'today' : ''}" data-date="${key}">
           <div class="md-num">${date.getDate()}</div>
           <div class="md-events">
+            ${dayAbsences.map((row) => `<div class="md-absence ${row.status === 'beantragt' ? 'pending' : ''}" title="${esc(absenceTitle(row))}">
+              <span class="md-dot" style="background:${row.status === 'beantragt' ? '#d97706' : '#be123c'}"></span>
+              <span class="md-title">${esc(absenceDayLabel(row))}</span>
+            </div>`).join('')}
             ${events.slice(0, 3).map((event) => {
               const info = kindInfo(event.kind);
               return `<div class="md-event" data-action="open-appointment" data-id="${event.id}" data-order="${event.order_id || ''}" title="${esc(event.title)} · ${esc(info.label)}">
@@ -2571,7 +2599,7 @@ async function renderPlanning() {
                 const events = board.appointments.filter((row) => row.employee_id === employee.id
                   && toDateInput(row.start_at) === key);
                 return `<td class="pt-cell ${key === todayKey ? 'today' : ''}">
-                  ${absences.map((row) => `<span class="pt-chip absence">${esc(row.type === 'urlaub' ? 'Urlaub' : 'Abwesend')}</span>`).join('')}
+                  ${absences.map((row) => `<span class="pt-chip absence ${row.status === 'beantragt' ? 'pending' : ''}" title="${esc(absenceTitle(row))}">${esc(absenceLabel(row))}</span>`).join('')}
                   ${events.map((row) => `<button class="pt-chip appt" type="button" data-action="open-appointment" data-id="${row.id}" title="${esc(row.title)}">
                     <span>${fmtTime(row.start_at)}</span>${esc(row.order_title || row.title)}
                   </button>`).join('')}
@@ -2998,7 +3026,7 @@ async function renderReports() {
     </div>`;
 }
 
-async function newReportModal(orderId = null, { dictate = false } = {}) {
+async function newReportModal(orderId = null, { dictate = false, initialContent = '' } = {}) {
   if (!can('reports.own')) return toast('Keine Berechtigung zum Erstellen von Berichten.', 'error');
   if (!(state.orderOptions || []).length) {
     try {
@@ -3020,6 +3048,7 @@ async function newReportModal(orderId = null, { dictate = false } = {}) {
       { name: 'hours', label: 'Arbeitsstunden', type: 'number', step: '0.25', min: 0, default: 0 },
       {
         name: 'content', label: 'Bericht', type: 'textarea', rows: 7, full: true, required: true, dictate: true,
+        default: initialContent,
         placeholder: 'Was wurde gemacht? Material, Auffälligkeiten, Kunde eingewiesen …',
         hint: 'Tippe auf „Diktieren“ und sprich den Bericht – Text erscheint automatisch.',
       },
@@ -3518,37 +3547,139 @@ function speak(text) {
 }
 
 function listenInline(textarea, statusEl, label = 'Bericht') {
-  const recognition = startVoiceRecognition('report');
+  if (!textarea) return;
+  // Erneutes Tippen auf das Mikrofon beendet das laufende Diktat.
+  if (state.dictation && state.dictation.textarea === textarea) {
+    state.dictation.stop();
+    return;
+  }
+  if (state.dictation) state.dictation.stop();
+
+  const recognition = startVoiceRecognition('report', { continuous: true });
   if (!recognition) {
     if (statusEl) statusEl.textContent = 'Spracherkennung nicht verfügbar – bitte Text eingeben.';
     return;
   }
-  if (statusEl) statusEl.textContent = `Ich höre … ${label} sprechen.`;
-  let finalText = '';
+  // Eigene Sprachausgabe stoppen, damit sie nicht ins Diktat gerät.
+  try { window.speechSynthesis?.cancel(); } catch { /* stumm */ }
+
+  const appendSpoken = (value) => {
+    const clean = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return;
+    const current = textarea.value;
+    const separator = !current ? '' : (/\s$/.test(current) ? '' : ' ');
+    textarea.value = `${current}${separator}${clean}`;
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  const scope = textarea.closest('.modal') || document;
+  const buttons = [...scope.querySelectorAll('[data-dictate], [data-action="report-dictate"]')];
+  buttons.forEach((button) => button.classList.add('listening'));
+
+  let sessionFinal = '';
+  let committedInSession = 0;
+  let recognized = false;
+  let stopped = false;
+  let restartTimer = null;
+  let finished = false;
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    state.dictation = null;
+    buttons.forEach((button) => button.classList.remove('listening'));
+    if (statusEl) {
+      statusEl.textContent = recognized
+        ? `Diktat beendet – ${label} übernommen. Nicht vergessen zu speichern.`
+        : 'Diktat beendet. Es wurde nichts erkannt.';
+    }
+  };
+
+  const session = {
+    textarea,
+    stop() {
+      stopped = true;
+      clearTimeout(restartTimer);
+      try { recognition.stop(); } catch { /* war bereits beendet */ }
+    },
+  };
+  state.dictation = session;
+
+  if (statusEl) statusEl.textContent = `Ich höre … ${label} sprechen. Tippe erneut auf das Mikrofon, um zu beenden.`;
+  recognition.onstart = () => {
+    // Bei einem automatischen Neustart beginnt der Browser mit leeren Results.
+    sessionFinal = '';
+    committedInSession = 0;
+  };
   recognition.onresult = (event) => {
     let interim = '';
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+    let complete = '';
+    for (let i = 0; i < event.results.length; i += 1) {
       const transcript = event.results[i][0].transcript;
-      if (event.results[i].isFinal) finalText += transcript;
+      if (event.results[i].isFinal) complete += `${transcript} `;
       else interim += transcript;
     }
-    if (statusEl) statusEl.textContent = finalText || interim || 'Ich höre …';
+    sessionFinal = complete;
+    // Nur neu erkannte, endgültige Teile anhängen. Der vorhandene Bericht
+    // bleibt immer erhalten – auch wenn zwischendurch ein Gespräch läuft.
+    const pending = sessionFinal.slice(committedInSession).trim();
+    if (pending) {
+      appendSpoken(pending);
+      committedInSession = sessionFinal.length;
+      recognized = true;
+    }
+    if (statusEl) {
+      statusEl.textContent = interim
+        ? `Ich höre … ${interim}`
+        : 'Diktat läuft … tippe erneut auf das Mikrofon, um zu beenden.';
+    }
   };
-  recognition.onerror = () => {
-    if (statusEl) statusEl.textContent = 'Mikrofon nicht verfügbar. Bitte Text eingeben oder HTTPS verwenden.';
-  };
-  recognition.onend = () => {
-    const text = finalText.trim();
-    if (!text) {
-      if (statusEl) statusEl.textContent = 'Nichts erkannt – bitte erneut versuchen.';
+  recognition.onerror = (event) => {
+    if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(event.error)) {
+      stopped = true;
+      clearTimeout(restartTimer);
+      state.dictation = null;
+      buttons.forEach((button) => button.classList.remove('listening'));
+      if (statusEl) {
+        statusEl.textContent = event.error === 'not-allowed'
+          ? 'Mikrofonzugriff wurde verweigert. Bitte in den Browser-Einstellungen erlauben.'
+          : 'Mikrofon nicht verfügbar. Bitte Text eingeben oder HTTPS verwenden.';
+      }
       return;
     }
-    textarea.value = `${textarea.value ? `${textarea.value} ` : ''}${text}`;
-    textarea.dispatchEvent(new Event('change'));
-    if (statusEl) statusEl.textContent = 'Diktat übernommen – nicht vergessen zu speichern.';
-    speak('Diktat übernommen.');
+    if (statusEl && event.error !== 'no-speech' && event.error !== 'aborted') {
+      statusEl.textContent = 'Spracherkennung unterbrochen – ich höre weiter zu …';
+    }
   };
-  try { recognition.start(); } catch {
+  recognition.onend = () => {
+    if (stopped) {
+      finish();
+      return;
+    }
+    if (!textarea.isConnected) {
+      state.dictation = null;
+      buttons.forEach((button) => button.classList.remove('listening'));
+      return;
+    }
+    // Browser beenden Diktate nach Sprechpausen selbst. Automatisch weiterhören,
+    // damit ein Gespräch zwischendurch den Bericht nicht abschneidet.
+    restartTimer = setTimeout(() => {
+      if (stopped || !textarea.isConnected) return;
+      try {
+        recognition.start();
+      } catch {
+        restartTimer = setTimeout(() => {
+          if (stopped || !textarea.isConnected) return;
+          try { recognition.start(); } catch { finish(); }
+        }, 700);
+      }
+    }, 250);
+  };
+  try {
+    recognition.start();
+  } catch {
+    state.dictation = null;
+    buttons.forEach((button) => button.classList.remove('listening'));
     if (statusEl) statusEl.textContent = 'Aufnahme läuft bereits.';
   }
 }
@@ -3593,7 +3724,7 @@ function openVoiceModal(mode = 'command') {
   if (supported) listenOnce(mode);
 }
 
-function startVoiceRecognition(mode = 'command') {
+function startVoiceRecognition(mode = 'command', { continuous = false } = {}) {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
     toast('Spracherkennung wird von diesem Browser nicht unterstützt. Bitte Text eingeben.', 'error');
@@ -3602,7 +3733,7 @@ function startVoiceRecognition(mode = 'command') {
   const recognition = new Recognition();
   recognition.lang = 'de-DE';
   recognition.interimResults = true;
-  recognition.continuous = false;
+  recognition.continuous = continuous;
   recognition.maxAlternatives = 1;
   return recognition;
 }
@@ -3670,13 +3801,17 @@ async function handleVoiceText(rawText, mode = 'command') {
   const lower = text.toLowerCase();
 
   if (mode === 'report') {
-    const content = $('#report-content');
+    const content = $('#report-content') || $('#modal-form textarea[name="content"]');
     if (content) {
-      content.value = `${content.value ? `${content.value}\n` : ''}${text}`;
-      content.dispatchEvent(new Event('change'));
+      const current = content.value.replace(/\s+$/, '');
+      content.value = `${current ? `${current} ` : ''}${text}`;
+      content.dispatchEvent(new Event('change', { bubbles: true }));
+      speak('Bericht übernommen.');
+      return;
     }
     closeModal();
-    speak('Bericht übernommen.');
+    newReportModal(null, { dictate: true, initialContent: text });
+    speak('Bericht übernommen. Du kannst weiter diktieren.');
     return;
   }
 
