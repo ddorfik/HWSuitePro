@@ -965,3 +965,114 @@ body.logged-out { background: radial-gradient(1200px 600px at 10% 0%, #14434f 0%
 .lookup-result .lr-main { flex: 1; min-width: 0; }
 .lookup-result .lr-title { font-size: 13px; font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .lookup-result .lr-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+
+/* ================================================================ Hero-Parität */
+.section-head.compact { align-items: center; margin: 0 0 10px; }
+.section-head.compact h3, .section-head.compact h4 { margin: 0; font-size: 13.5px; }
+.subcard h4 { text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--ink); }
+.list-row.static { cursor: default; }
+.list-row.static:hover { background: transparent; }
+.list-stack.padded { padding: 4px 16px 10px; }
+.lr-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.spacer { flex: 1 1 auto; }
+.tech-btn em {
+  font-style: normal; font-size: 9.5px; font-weight: 700; background: var(--brand); color: #fff;
+  border-radius: 999px; padding: 1px 6px; line-height: 1.5;
+}
+.cell-sub { font-size: 10.5px; color: var(--muted); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.notice { padding: 10px 12px; border-radius: 10px; background: var(--info-soft); color: #1e3a8a; font-size: 12px; }
+.notice.warn { background: var(--warn-soft); color: #92400e; }
+.empty-state { text-align: center; padding: 48px 20px; color: var(--muted); }
+.empty-state h3 { margin: 12px 0 4px; color: var(--ink); font-size: 16px; }
+.empty-ico {
+  width: 52px; height: 52px; border-radius: 16px; margin: 0 auto; display: grid; place-items: center;
+  background: var(--brand-soft); color: var(--brand);
+}
+.empty-ico svg { width: 26px; height: 26px; }
+
+/* E-Rechnung */
+.einvoice-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--surface-2);
+}
+.einvoice-bar .small { margin-right: auto; }
+
+/* Plantafel */
+.board-scroll { overflow-x: auto; border-top: 1px solid var(--line); }
+.plantafel { border-collapse: collapse; width: 100%; min-width: 880px; }
+.plantafel th, .plantafel td { border-bottom: 1px solid #eef2f4; }
+.plantafel thead th {
+  padding: 8px 6px; font-size: 10.5px; color: var(--muted); font-weight: 600;
+  text-align: center; background: var(--surface-2); position: sticky; top: 0; z-index: 1;
+}
+.plantafel thead th span { display: block; text-transform: uppercase; letter-spacing: .5px; font-size: 9.5px; }
+.plantafel thead th b { font-size: 12px; color: var(--ink); }
+.plantafel th.today, .plantafel td.today { background: #fdf7e8; }
+.pt-name {
+  position: sticky; left: 0; z-index: 2; background: var(--surface);
+  min-width: 180px; max-width: 220px; padding: 8px 10px; text-align: left;
+  display: flex; align-items: center; gap: 8px; font-weight: 600;
+}
+.plantafel thead .pt-name { background: var(--surface-2); font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.pt-name small { display: block; font-size: 10px; color: var(--muted); font-weight: 500; }
+.pt-cell { min-width: 112px; height: 56px; padding: 3px; vertical-align: top; }
+.pt-chip {
+  display: flex; align-items: center; gap: 4px; width: 100%; margin-bottom: 3px;
+  border: 0; border-radius: 6px; padding: 3px 5px; font-size: 10.5px; font-weight: 600;
+  text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer;
+}
+.pt-chip span { font-weight: 700; font-variant-numeric: tabular-nums; }
+.pt-chip.appt { background: var(--brand-soft); color: var(--brand); }
+.pt-chip.resource { background: var(--accent-soft); color: #92400e; }
+.pt-chip.absence { background: var(--danger-soft); color: var(--danger); cursor: default; }
+.pt-add {
+  width: 100%; border: 1px dashed #cfdadd; background: none; border-radius: 6px;
+  color: var(--muted-2); font-size: 13px; cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.pt-cell:hover .pt-add, .pt-add:focus-visible { opacity: 1; }
+.resource-dot {
+  width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+  color: #fff; flex: none;
+}
+.resource-dot svg { width: 15px; height: 15px; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+
+/* Kalkulation */
+.compact-table { width: 100%; border-collapse: collapse; }
+.compact-table th {
+  text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--muted); padding: 6px 5px; border-bottom: 1px solid var(--line); font-weight: 700;
+}
+.compact-table td { padding: 5px; border-bottom: 1px solid #f1f5f6; font-size: 12px; vertical-align: middle; }
+.compact-table .right, .compact-table td.right { text-align: right; }
+.calc-input {
+  width: 82px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px;
+  text-align: right; font-variant-numeric: tabular-nums; background: #fff;
+}
+
+/* Aufmaß, Checklisten, Unterschrift */
+.progress { height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.progress span { display: block; height: 100%; background: var(--brand); border-radius: 999px; transition: width .2s; }
+.check-row {
+  display: flex; align-items: flex-start; gap: 9px; padding: 7px 2px;
+  border-bottom: 1px solid #f1f5f6; font-size: 12.5px; cursor: pointer;
+}
+.check-row:last-child { border-bottom: 0; }
+.check-row input { width: 17px; height: 17px; margin-top: 1px; accent-color: var(--brand); flex: none; }
+.check-row small { display: block; color: var(--muted); font-size: 11px; }
+.signature-pad {
+  width: 100%; display: block; background: #fff; border: 1px dashed #c3d1d5;
+  border-radius: 10px; touch-action: none; cursor: crosshair;
+}
+
+@media (hover: none) {
+  .pt-add { opacity: .55; }
+}
+@media (max-width: 760px) {
+  .einvoice-bar { align-items: flex-start; }
+  .einvoice-bar .small { margin-right: 0; }
+  .calc-input { width: 66px; }
+  .list-stack.padded { padding: 4px 10px 8px; }
+}

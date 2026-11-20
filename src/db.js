@@ -314,7 +314,249 @@ CREATE TABLE IF NOT EXISTS customer_notes (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- DMS / GoBD-Ablage: Dateien liegen unter data/ablage, Metadaten hier.
+CREATE TABLE IF NOT EXISTS documents (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id   INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+  order_id      INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+  invoice_id    INTEGER REFERENCES invoices(id) ON DELETE SET NULL,
+  report_id     INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+  category      TEXT NOT NULL DEFAULT 'sonstiges',
+  title         TEXT NOT NULL,
+  filename      TEXT NOT NULL,
+  original_name TEXT,
+  mime          TEXT,
+  size          INTEGER NOT NULL DEFAULT 0,
+  sha256        TEXT,
+  version       INTEGER NOT NULL DEFAULT 1,
+  parent_id     INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+  note          TEXT,
+  created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS document_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  action      TEXT NOT NULL,
+  detail      TEXT,
+  ip          TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Plantafel: Personal, Fahrzeuge, Werkzeuge und Maschinen.
+CREATE TABLE IF NOT EXISTS resources (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  type       TEXT NOT NULL DEFAULT 'fahrzeug',
+  identifier TEXT,
+  capacity   REAL NOT NULL DEFAULT 1,
+  color      TEXT DEFAULT '#0f766e',
+  active     INTEGER NOT NULL DEFAULT 1,
+  notes      TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS resource_bookings (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_id INTEGER NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+  order_id    INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+  employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+  start_at    TEXT NOT NULL,
+  end_at      TEXT NOT NULL,
+  note        TEXT,
+  status      TEXT NOT NULL DEFAULT 'geplant',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Personal: Urlaub, Abwesenheiten, Arbeitszeitkonten.
+CREATE TABLE IF NOT EXISTS absences (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id  INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  type         TEXT NOT NULL DEFAULT 'urlaub',
+  start_date   TEXT NOT NULL,
+  end_date     TEXT NOT NULL,
+  days         REAL NOT NULL DEFAULT 0,
+  status       TEXT NOT NULL DEFAULT 'beantragt',
+  note         TEXT,
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  decided_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  decided_at   TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS time_adjustments (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  date        TEXT NOT NULL,
+  minutes     INTEGER NOT NULL DEFAULT 0,
+  type        TEXT NOT NULL DEFAULT 'korrektur',
+  note        TEXT,
+  created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS vacation_entitlements (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  year        INTEGER NOT NULL,
+  days        REAL NOT NULL DEFAULT 30,
+  note        TEXT,
+  UNIQUE (employee_id, year)
+);
+
+-- Finanzen: Bankabgleich und SEPA.
+CREATE TABLE IF NOT EXISTS bank_transactions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  date         TEXT NOT NULL,
+  amount       REAL NOT NULL,
+  purpose      TEXT,
+  counterparty TEXT,
+  iban         TEXT,
+  reference    TEXT,
+  invoice_id   INTEGER REFERENCES invoices(id) ON DELETE SET NULL,
+  status       TEXT NOT NULL DEFAULT 'offen',
+  batch        TEXT,
+  imported_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  imported_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Aufmaß, Unterschrift, Checklisten und Bautagebuch.
+CREATE TABLE IF NOT EXISTS measurements (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  room        TEXT,
+  category    TEXT NOT NULL DEFAULT 'allgemein',
+  description TEXT NOT NULL,
+  length      REAL NOT NULL DEFAULT 0,
+  width       REAL NOT NULL DEFAULT 0,
+  height      REAL NOT NULL DEFAULT 0,
+  count       REAL NOT NULL DEFAULT 1,
+  factor      REAL NOT NULL DEFAULT 1,
+  unit        TEXT NOT NULL DEFAULT 'm²',
+  quantity    REAL NOT NULL DEFAULT 0,
+  note        TEXT,
+  created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS signatures (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id      INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  report_id     INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+  customer_name TEXT NOT NULL,
+  image_path    TEXT NOT NULL,
+  sha256        TEXT,
+  note          TEXT,
+  user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  ip            TEXT,
+  signed_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS checklist_templates (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  trade      TEXT,
+  items      TEXT NOT NULL DEFAULT '[]',
+  active     INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS order_checklists (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  template_id INTEGER REFERENCES checklist_templates(id) ON DELETE SET NULL,
+  name        TEXT NOT NULL,
+  created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS checklist_entries (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  checklist_id INTEGER NOT NULL REFERENCES order_checklists(id) ON DELETE CASCADE,
+  label        TEXT NOT NULL,
+  checked      INTEGER NOT NULL DEFAULT 0,
+  note         TEXT,
+  sort         INTEGER NOT NULL DEFAULT 0,
+  checked_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  checked_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS site_diary (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  date        TEXT NOT NULL,
+  weather     TEXT,
+  temperature TEXT,
+  personnel   TEXT,
+  work_done   TEXT NOT NULL DEFAULT '',
+  material    TEXT,
+  incidents   TEXT,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Lager: Inventur und Scan.
+CREATE TABLE IF NOT EXISTS inventory_sessions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'offen',
+  note       TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  closed_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS inventory_counts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id   INTEGER NOT NULL REFERENCES inventory_sessions(id) ON DELETE CASCADE,
+  article_id   INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+  system_qty   REAL NOT NULL DEFAULT 0,
+  counted_qty  REAL NOT NULL DEFAULT 0,
+  diff         REAL NOT NULL DEFAULT 0,
+  note         TEXT,
+  counted_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  counted_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (session_id, article_id)
+);
+
+-- Schnittstellen: Webhooks.
+CREATE TABLE IF NOT EXISTS webhooks (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  url        TEXT NOT NULL,
+  events     TEXT NOT NULL DEFAULT '[]',
+  secret     TEXT,
+  active     INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_status INTEGER,
+  last_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  webhook_id INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+  event      TEXT NOT NULL,
+  status     INTEGER,
+  error      TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_customer_notes_customer ON customer_notes(customer_id);
+CREATE INDEX IF NOT EXISTS idx_documents_customer ON documents(customer_id);
+CREATE INDEX IF NOT EXISTS idx_documents_order ON documents(order_id);
+CREATE INDEX IF NOT EXISTS idx_documents_invoice ON documents(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_document_events_doc ON document_events(document_id);
+CREATE INDEX IF NOT EXISTS idx_resource_bookings_start ON resource_bookings(start_at);
+CREATE INDEX IF NOT EXISTS idx_absences_employee ON absences(employee_id);
+CREATE INDEX IF NOT EXISTS idx_absences_dates ON absences(start_date, end_date);
+CREATE INDEX IF NOT EXISTS idx_bank_transactions_invoice ON bank_transactions(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_measurements_order ON measurements(order_id);
+CREATE INDEX IF NOT EXISTS idx_signatures_order ON signatures(order_id);
+CREATE INDEX IF NOT EXISTS idx_checklists_order ON order_checklists(order_id);
+CREATE INDEX IF NOT EXISTS idx_diary_order ON site_diary(order_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_counts_session ON inventory_counts(session_id);
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id);
@@ -361,8 +603,41 @@ ensureColumn('articles', 'source', 'TEXT');
 ensureColumn('articles', 'source_id', 'TEXT');
 ensureColumn('articles', 'price_unit', 'TEXT');
 ensureColumn('articles', 'last_sync_at', 'TEXT');
+// E-Rechnung, DMS und Stammdaten
+ensureColumn('customers', 'leitweg_id', 'TEXT');
+ensureColumn('customers', 'iban', 'TEXT');
+ensureColumn('customers', 'bic', 'TEXT');
+ensureColumn('customers', 'sepa_mandate', 'TEXT');
+ensureColumn('customers', 'sepa_mandate_date', 'TEXT');
+ensureColumn('customers', 'payment_terms_days', 'INTEGER');
+ensureColumn('invoices', 'buyer_reference', 'TEXT');
+ensureColumn('invoices', 'einvoice_format', 'TEXT');
+ensureColumn('invoices', 'einvoice_status', "TEXT NOT NULL DEFAULT 'entwurf'");
+ensureColumn('invoices', 'einvoice_at', 'TEXT');
+// Kalkulation und Nachkalkulation
+ensureColumn('orders', 'calc_wage_rate', 'REAL');
+ensureColumn('orders', 'calc_overhead_pct', 'REAL');
+ensureColumn('orders', 'calc_profit_pct', 'REAL');
+ensureColumn('orders', 'calc_discount_pct', 'REAL');
+ensureColumn('orders', 'calc_mode', "TEXT NOT NULL DEFAULT 'summe'");
+ensureColumn('order_items', 'cost_wage', 'REAL');
+ensureColumn('order_items', 'cost_material', 'REAL');
+ensureColumn('order_items', 'cost_equipment', 'REAL');
+ensureColumn('order_items', 'cost_other', 'REAL');
+ensureColumn('order_items', 'calc_note', 'TEXT');
+// Personal
+ensureColumn('employees', 'weekly_hours', 'REAL');
+ensureColumn('employees', 'vacation_days', 'REAL');
+ensureColumn('employees', 'entry_date', 'TEXT');
+ensureColumn('employees', 'exit_date', 'TEXT');
+ensureColumn('time_adjustments', 'created_by', 'INTEGER');
+// Lager
+ensureColumn('articles', 'barcode', 'TEXT');
+ensureColumn('articles', 'location', 'TEXT');
 // Index erst nach der Migration: bestehende Datenbanken haben die Spalte noch nicht.
 db.exec('CREATE INDEX IF NOT EXISTS idx_articles_gtin ON articles(gtin);');
+db.exec('CREATE INDEX IF NOT EXISTS idx_articles_barcode ON articles(barcode);');
+db.exec('CREATE INDEX IF NOT EXISTS idx_customers_leitweg ON customers(leitweg_id);');
 
 // Sitzungen aus der Zeit vor der Token-Hashing-Umstellung sind ungültig.
 db.exec("DELETE FROM sessions WHERE length(id) != 64;");
@@ -465,6 +740,29 @@ export const DEFAULT_SETTINGS = {
   mat_ids_shop_url: '',
   mat_ids_supplier: '',
   mat_ids_search_path: '/search?q={article}',
+
+  // E-Rechnung (XRechnung/ZUGFeRD)
+  einvoice_format: 'xrechnung',
+  einvoice_seller_contact: 'Stefan Möller',
+  einvoice_seller_phone: '',
+  einvoice_seller_email: '',
+  einvoice_payment_means: '58',
+  einvoice_note: 'Es gelten unsere Allgemeinen Geschäftsbedingungen.',
+  // Kalkulation
+  default_calc_wage_rate: '42',
+  default_calc_overhead_pct: '8',
+  default_calc_profit_pct: '12',
+  default_calc_discount_pct: '0',
+  // Personal
+  hr_weekly_hours: '40',
+  hr_vacation_days: '30',
+  // Finanzen
+  sepa_creditor_id: '',
+  datev_consultant: '12345',
+  datev_client: '1',
+  datev_account_revenue: '8400',
+  datev_account_receivable: '10000',
+  datev_account_bank: '1200',
 };
 
 export function getSettings() {

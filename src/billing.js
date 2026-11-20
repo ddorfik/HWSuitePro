@@ -4,6 +4,7 @@ import {
   db, DATA_DIR, getSettings, nextNumber, logActivity, invoiceTotals, round2, addDays, todayISO,
 } from './db.js';
 import { renderInvoicePdf, renderOrderPdf } from './documents.js';
+import { archiveInvoicePdf } from './dms.js';
 
 const PDF_DIR = join(DATA_DIR, 'dokumente');
 mkdirSync(PDF_DIR, { recursive: true });
@@ -49,11 +50,11 @@ function pdfFilename(invoice, suffix = '') {
   return `${safe}.pdf`;
 }
 
-export function invoicePdf(invoiceId, { dunning = null, persist = false } = {}) {
+export function invoicePdf(invoiceId, { dunning = null, persist = false, einvoiceXml = null } = {}) {
   const data = loadInvoiceData(invoiceId);
   if (!data) return null;
   const settings = getSettings();
-  const buffer = renderInvoicePdf({ ...data, settings, dunning });
+  const buffer = renderInvoicePdf({ ...data, settings, dunning, einvoiceXml });
   const suffix = dunning ? `-Mahnung-${dunning.level}` : '';
   const filename = pdfFilename(data.invoice, suffix);
   const relative = join('dokumente', filename);
@@ -93,7 +94,7 @@ export function adjustStock(articleId, quantity, reason, refType = null, refId =
 export function createInvoiceFromOrder(orderId, { date = todayISO(), dueDays = null, notes = '' } = {}) {
   const data = loadOrderData(orderId);
   if (!data) throw new Error('Auftrag nicht gefunden');
-  const { order, items } = data;
+  const { order, items, customer } = data;
   if (order.doc_type === 'angebot') throw new Error('Angebote müssen zuerst in einen Auftrag umgewandelt werden');
   if (order.status === 'storniert') throw new Error('Stornierte Aufträge können nicht abgerechnet werden');
   const existing = db.prepare('SELECT id, number FROM invoices WHERE order_id = ?').get(orderId);
@@ -110,7 +111,7 @@ export function createInvoiceFromOrder(orderId, { date = todayISO(), dueDays = n
   const settings = getSettings();
   const taxRate = Number(order.tax_rate) || Number(settings.default_tax_rate);
   const totals = invoiceTotals(positions, taxRate);
-  const paymentDays = Number(dueDays ?? settings.payment_days);
+  const paymentDays = Number(dueDays ?? customer?.payment_terms_days ?? settings.payment_days);
   const dueDate = addDays(date, paymentDays);
   const number = nextNumber('invoice', settings.invoice_prefix);
 
@@ -119,11 +120,12 @@ export function createInvoiceFromOrder(orderId, { date = todayISO(), dueDays = n
   try {
     invoiceId = Number(db.prepare(
       `INSERT INTO invoices (number, order_id, customer_id, property_id, date, due_date, service_date, status, tax_rate,
-         subtotal, tax_total, total, notes)
-       VALUES (?,?,?,?,?,?,?,'offen',?,?,?,?,?)`
+         subtotal, tax_total, total, notes, buyer_reference)
+       VALUES (?,?,?,?,?,?,?,'offen',?,?,?,?,?,?)`
     ).run(number, order.id, order.customer_id, order.property_id, date, dueDate,
       (order.completed_at ? String(order.completed_at).slice(0, 10) : date), taxRate,
-      totals.subtotal, totals.tax, totals.total, notes).lastInsertRowid);
+      totals.subtotal, totals.tax, totals.total, notes,
+      customer?.leitweg_id || customer?.buyer_reference || number).lastInsertRowid);
 
     positions.forEach((item, index) => {
       db.prepare(
@@ -151,8 +153,14 @@ export function createInvoiceFromOrder(orderId, { date = todayISO(), dueDays = n
     throw error;
   }
 
-  invoicePdf(invoiceId, { persist: true });
-  return db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId);
+  const created = db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId);
+  try {
+    const pdf = invoicePdf(invoiceId, { persist: true });
+    archiveInvoicePdf(created, pdf?.buffer);
+  } catch (error) {
+    logActivity('fehler', `Dokumentenarchiv für ${number}: ${error.message}`);
+  }
+  return created;
 }
 
 export function recalcInvoice(invoiceId) {

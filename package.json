@@ -1,6 +1,6 @@
 {
   "name": "handwerkpro",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "description": "Handwerkersoftware für alle Gewerke: Aufträge, Planung, Zeiterfassung, Berichte, Fotos, Rechnungen und Sprachsteuerung",
   "type": "module",
   "private": true,

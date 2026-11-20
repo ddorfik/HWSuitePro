@@ -47,6 +47,14 @@
     {
       "name": "Zeiterfassung",
       "url": "/#/time"
+    },
+    {
+      "name": "Plantafel",
+      "url": "/#/planning"
+    },
+    {
+      "name": "Dokumente",
+      "url": "/#/documents"
     }
   ]
 }

@@ -27,6 +27,44 @@ import {
   materialSources, MATERIAL_SECRET_SETTINGS, importCatalog, testSource, lookupMaterial,
   enrichArticle, catalogImportHistory, dealerDeepLink, gtinInfo,
 } from './materials.js';
+import { buildXRechnung, buildZugferdXml, xmlFilename } from './einvoice.js';
+import {
+  DOCUMENT_CATEGORIES, listDocuments, storeDocument, storeFromDataUrl, documentRow,
+  documentFilePath, documentVersions, documentEvents, softDeleteDocument, logDocumentEvent,
+  archiveInvoicePdf,
+} from './dms.js';
+import { orderCalculation, updateCalculation, applyCalculation } from './calc.js';
+import {
+  planningBoard, listResources, createResource, updateResource, deleteResource,
+  createBooking, updateBooking, deleteBooking,
+} from './resources.js';
+import {
+  ABSENCE_TYPES, ABSENCE_STATUS, listAbsences, createAbsence, decideAbsence, deleteAbsence,
+  vacationAccount, setVacationEntitlement, overtimeAccount, hrOverview,
+  listAdjustments, createAdjustment,
+} from './hr.js';
+import {
+  parseBankFile, importBankTransactions, listBankTransactions, autoMatchTransactions,
+  bookTransaction, unmatchTransaction, datevExport, sepaPreview, sepaExport, financeOverview,
+} from './finance.js';
+import {
+  MEASUREMENT_CATEGORIES, measurementQuantity, listMeasurements, createMeasurement,
+  updateMeasurement, deleteMeasurement, applyMeasurements, saveSignature, listSignatures,
+  signatureRow, checklistTemplates, createChecklistTemplate, updateChecklistTemplate,
+  deleteChecklistTemplate, orderChecklists, createOrderChecklist, updateChecklistEntry,
+  addChecklistEntry, deleteChecklist, listDiary, createDiaryEntry, updateDiaryEntry,
+  deleteDiaryEntry, siteSummary, signatureFilePath,
+} from './site.js';
+import {
+  exportGaeb, importGaebToOrder, importOciToOrder, listWebhooks, createWebhook,
+  updateWebhook, deleteWebhook, webhookDeliveries, testWebhook, emitWebhook,
+  openapiDocument,
+} from './interfaces.js';
+import {
+  lookupArticleByCode, listInventorySessions, createInventorySession, inventorySession,
+  saveInventoryCount, closeInventorySession, deleteInventorySession,
+} from './inventory.js';
+import { draftText } from './assistant.js';
 
 class HttpError extends Error {
   constructor(status, message, code = null) {
@@ -119,6 +157,32 @@ function pick(body, fields) {
   }
   return out;
 }
+
+/** Modulfehler (Validierung) als 400 ausliefern, echte Fehler bleiben 500. */
+function asApi(fn) {
+  const convert = (error) => {
+    if (error?.status) throw error;
+    throw new HttpError(400, error?.message || 'Ungültige Eingabe');
+  };
+  try {
+    const result = fn();
+    if (result && typeof result.then === 'function') return result.catch(convert);
+    return result;
+  } catch (error) {
+    return convert(error);
+  }
+}
+
+const decodeUpload = (body = {}) => {
+  if (body.dataUrl) {
+    const match = /^data:([a-z0-9.+/-]+);base64,(.+)$/i.exec(String(body.dataUrl));
+    if (!match) throw new HttpError(400, 'Ungültige Datei');
+    return { buffer: Buffer.from(match[2], 'base64'), mime: match[1] };
+  }
+  if (body.base64) return { buffer: Buffer.from(String(body.base64), 'base64'), mime: str(body.mime) };
+  if (body.content != null) return { buffer: Buffer.from(String(body.content), 'utf8'), mime: str(body.mime) || 'text/plain' };
+  throw new HttpError(400, 'Bitte eine Datei übermitteln');
+};
 
 function insertRow(table, data) {
   const keys = Object.keys(data);
@@ -1037,17 +1101,30 @@ route('POST', '/api/customers', (req) => {
     phone: str(body.phone),
     mobile: str(body.mobile),
     notes: str(body.notes),
+    leitweg_id: str(body.leitweg_id),
+    iban: str(body.iban).replace(/\s+/g, '').toUpperCase(),
+    bic: str(body.bic).replace(/\s+/g, '').toUpperCase(),
+    sepa_mandate: str(body.sepa_mandate),
+    sepa_mandate_date: str(body.sepa_mandate_date) || null,
+    payment_terms_days: body.payment_terms_days ? num(body.payment_terms_days) : null,
   };
   const id = insertRow('customers', data);
   logActivity('kunde', `Neuer Kunde ${data.company || `${data.first_name} ${data.last_name}`} angelegt.`);
-  return db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
+  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
+  emitWebhook('customer.created', { id: customer.id, number: customer.number, name: data.company || `${data.first_name} ${data.last_name}` });
+  return customer;
 }, { permission: 'customers.manage' });
 
 route('PUT', '/api/customers/:id', (req, res, params) => {
   const data = pick(req.body ?? {}, [
     'type', 'salutation', 'company', 'first_name', 'last_name', 'street', 'zip', 'city',
-    'email', 'phone', 'mobile', 'notes',
+    'email', 'phone', 'mobile', 'notes', 'leitweg_id', 'iban', 'bic', 'sepa_mandate',
+    'sepa_mandate_date', 'payment_terms_days',
   ]);
+  if ('iban' in data) data.iban = str(data.iban).replace(/\s+/g, '').toUpperCase();
+  if ('bic' in data) data.bic = str(data.bic).replace(/\s+/g, '').toUpperCase();
+  if ('sepa_mandate_date' in data && !data.sepa_mandate_date) data.sepa_mandate_date = null;
+  if ('payment_terms_days' in data) data.payment_terms_days = data.payment_terms_days ? num(data.payment_terms_days) : null;
   updateRow('customers', params.id, data);
   return db.prepare('SELECT * FROM customers WHERE id = ?').get(params.id);
 }, { permission: 'customers.manage' });
@@ -1140,13 +1217,19 @@ route('POST', '/api/employees', (req) => {
     rate: num(body.rate),
     color: str(body.color) || '#0f766e',
     active: bool(body.active ?? 1),
+    weekly_hours: body.weekly_hours !== undefined ? num(body.weekly_hours, 40) : num(getSettings().hr_weekly_hours, 40),
+    vacation_days: body.vacation_days !== undefined ? num(body.vacation_days, 30) : num(getSettings().hr_vacation_days, 30),
+    entry_date: str(body.entry_date) || null,
+    exit_date: str(body.exit_date) || null,
   });
   return db.prepare('SELECT * FROM employees WHERE id = ?').get(id);
 }, { permission: 'employees.manage' });
 
 route('PUT', '/api/employees/:id', (req, res, params) => {
-  const data = pick(req.body ?? {}, ['name', 'role', 'phone', 'rate', 'color', 'active']);
+  const data = pick(req.body ?? {}, ['name', 'role', 'phone', 'rate', 'color', 'active', 'weekly_hours', 'vacation_days', 'entry_date', 'exit_date']);
   if ('active' in data) data.active = bool(data.active);
+  if ('entry_date' in data && !data.entry_date) data.entry_date = null;
+  if ('exit_date' in data && !data.exit_date) data.exit_date = null;
   updateRow('employees', params.id, data);
   return db.prepare('SELECT * FROM employees WHERE id = ?').get(params.id);
 }, { permission: 'employees.manage' });
@@ -1169,10 +1252,11 @@ route('GET', '/api/articles', (req, res, params, url) => {
     `SELECT a.*, ROUND(stock * purchase_price, 2) AS stock_value,
        CASE WHEN stock <= min_stock THEN 1 ELSE 0 END AS low
      FROM articles a
-     WHERE (? = '%%' OR a.name LIKE ? OR a.number LIKE ? OR a.category LIKE ?)
+     WHERE (? = '%%' OR a.name LIKE ? OR a.number LIKE ? OR a.category LIKE ?
+        OR a.gtin LIKE ? OR a.barcode LIKE ? OR a.manufacturer_number LIKE ?)
        ${low ? 'AND a.stock <= a.min_stock' : ''}
      ORDER BY a.category, a.name`
-  ).all(q, q, q, q);
+  ).all(q, q, q, q, q, q, q);
   if (can(req.user, 'invoices.view')) return rows;
   return rows.map((row) => {
     const copy = { ...row };
@@ -1205,6 +1289,8 @@ route('POST', '/api/articles', (req) => {
     source: str(body.source),
     source_id: str(body.source_id),
     price_unit: str(body.price_unit),
+    barcode: str(body.barcode),
+    location: str(body.location),
   });
   if (num(body.stock) !== 0) {
     adjustStock(id, num(body.stock), 'Anfangsbestand');
@@ -1217,7 +1303,7 @@ route('PUT', '/api/articles/:id', (req, res, params) => {
     'number', 'name', 'category', 'unit', 'purchase_price', 'sale_price',
     'stock', 'min_stock', 'supplier', 'active', 'gtin', 'manufacturer',
     'manufacturer_number', 'etim_class', 'datasheet_url', 'image_url',
-    'source', 'source_id', 'price_unit',
+    'source', 'source_id', 'price_unit', 'barcode', 'location',
   ]);
   if ('active' in data) data.active = bool(data.active);
   updateRow('articles', params.id, data);
@@ -1501,6 +1587,7 @@ route('POST', '/api/orders', (req) => {
   }
 
   logActivity('auftrag', `${docType === 'angebot' ? 'Angebot' : 'Auftrag'} ${number} für ${str(body.title)} angelegt.`);
+  emitWebhook('order.created', { id, number, doc_type: docType, title: str(body.title), customer_id: num(body.customer_id) });
   return loadOrderData(id);
 }, { permission: 'orders.manage' });
 
@@ -1574,6 +1661,7 @@ route('POST', '/api/orders/:id/status', (req, res, params) => {
   else if (order.status === 'erledigt') data.completed_at = null;
   updateRow('orders', params.id, data);
   logActivity('auftrag', `Auftrag ${order.number} auf „${status}“ gesetzt.`);
+  emitWebhook('order.status', { id: order.id, number: order.number, status });
 
   let invoice = null;
   if (status === 'erledigt' && getSettings().auto_invoice === '1' && can(req.user, 'invoices.manage')) {
@@ -1634,6 +1722,7 @@ route('POST', '/api/orders/:id/invoice', (req, res, params) => {
     dueDays: body.dueDays != null ? num(body.dueDays) : null,
     notes: str(body.notes),
   });
+  emitWebhook('invoice.created', { id: invoice.id, number: invoice.number, total: invoice.total, order_id: invoice.order_id });
   return { invoice, pdf: `/api/invoices/${invoice.id}/pdf` };
 }, { permission: 'invoices.manage' });
 
@@ -1861,9 +1950,15 @@ route('PUT', '/api/invoices/:id', (req, res, params) => {
   const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(params.id);
   if (!invoice) throw new HttpError(404, 'Rechnung nicht gefunden');
   const body = req.body ?? {};
-  const data = pick(body, ['date', 'due_date', 'service_date', 'notes', 'status']);
+  const data = pick(body, ['date', 'due_date', 'service_date', 'notes', 'status', 'buyer_reference', 'einvoice_format', 'einvoice_status']);
   if ('status' in data && !['offen', 'bezahlt', 'storniert', 'gemahnt', 'teilweise'].includes(data.status)) {
     throw new HttpError(400, 'Ungültiger Status');
+  }
+  if ('einvoice_format' in data && !['xrechnung', 'zugferd'].includes(data.einvoice_format)) {
+    throw new HttpError(400, 'Unbekanntes E-Rechnungsformat');
+  }
+  if ('einvoice_status' in data && !['entwurf', 'erzeugt', 'versendet'].includes(data.einvoice_status)) {
+    throw new HttpError(400, 'Unbekannter E-Rechnungsstatus');
   }
   if ('date' in data && !('due_date' in data)) {
     const days = Math.round(
@@ -1892,6 +1987,7 @@ route('GET', '/api/invoices/:id/pdf', (req, res, params, url) => {
         },
       })
     : invoicePdf(params.id);
+  try { archiveInvoicePdf(invoice, pdf.buffer); } catch { /* Archiv ist optional */ }
   return { __pdf: pdf.buffer, filename: pdf.filename };
 }, { permission: 'invoices.view' });
 
@@ -1903,6 +1999,7 @@ route('POST', '/api/invoices/:id/payments', (req, res, params) => {
     method: str(body.method) || 'Überweisung',
     note: str(body.note),
   });
+  emitWebhook('invoice.paid', { id: invoice.id, number: invoice.number, paid_total: invoice.paid_total, total: invoice.total });
   return { invoice };
 }, { permission: 'invoices.manage' });
 
@@ -2366,6 +2463,7 @@ route('POST', '/api/reports/:id/approve', (req, res, params) => {
     "UPDATE reports SET status = 'freigegeben', approved_by = ?, approved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"
   ).run(req.user.id, params.id);
   logActivity('bericht', `Bericht #${params.id} freigegeben.`);
+  emitWebhook('report.approved', { id: report.id, order_id: report.order_id, hours: report.hours });
   const details = reportDetails(params.id);
   details.photos = details.photos.map(photoRow);
   return details;
@@ -2545,6 +2643,633 @@ route('GET', '/api/voice/search', (req, res, params, url) => {
 }, { permissions: ['orders.view.all', 'orders.view.own'] });
 
 
+/* ============================================================================
+ * HERO-Parität: E-Rechnung, DMS, Kalkulation, Plantafel, Personal, Finanzen,
+ * Aufmaß/Unterschrift/Checklisten/Bautagebuch, Inventur, Schnittstellen, Assistent
+ * ========================================================================== */
+
+// ----------------------------------------------------------------- E-Rechnung
+route('GET', '/api/invoices/:id/einvoice', (req, res, params, url) => asApi(() => {
+  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(params.id);
+  if (!invoice) throw new HttpError(404, 'Rechnung nicht gefunden');
+  if (invoice.status === 'storniert') throw new HttpError(400, 'Stornierte Rechnungen werden nicht als E-Rechnung erzeugt');
+  const data = loadInvoiceData(invoice.id);
+  const settings = getSettings();
+  const requested = str(url.searchParams.get('format')) || invoice.einvoice_format || settings.einvoice_format || 'xrechnung';
+  const format = requested === 'zugferd' ? 'zugferd' : 'xrechnung';
+  const xml = format === 'zugferd' ? buildZugferdXml(data, settings) : buildXRechnung(data, settings);
+  db.prepare(
+    "UPDATE invoices SET einvoice_format = ?, einvoice_status = CASE WHEN einvoice_status = 'versendet' THEN 'versendet' ELSE 'erzeugt' END, einvoice_at = datetime('now') WHERE id = ?"
+  ).run(format, invoice.id);
+  logActivity('rechnung', `${format === 'zugferd' ? 'ZUGFeRD' : 'XRechnung'} für ${invoice.number} erzeugt.`);
+
+  if (format === 'zugferd' && (url.searchParams.get('pdf') === '1' || url.searchParams.get('download') === 'pdf')) {
+    const pdf = invoicePdf(invoice.id, { einvoiceXml: xml, persist: true });
+    return {
+      __pdf: pdf.buffer,
+      filename: pdf.filename.replace(/\.pdf$/i, '-zugferd.pdf'),
+    };
+  }
+  return {
+    __buffer: Buffer.from(xml, 'utf8'),
+    mime: 'application/xml; charset=utf-8',
+    filename: xmlFilename(invoice, format),
+    disposition: 'attachment',
+  };
+}), { permission: 'invoices.view' });
+
+route('POST', '/api/invoices/:id/einvoice/status', (req, res, params) => asApi(() => {
+  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(params.id);
+  if (!invoice) throw new HttpError(404, 'Rechnung nicht gefunden');
+  const status = str(req.body?.status) || 'versendet';
+  if (!['entwurf', 'erzeugt', 'versendet'].includes(status)) throw new HttpError(400, 'Ungültiger Status');
+  db.prepare('UPDATE invoices SET einvoice_status = ?, einvoice_at = datetime(\'now\') WHERE id = ?').run(status, invoice.id);
+  return db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoice.id);
+}), { permission: 'invoices.manage' });
+
+// ----------------------------------------------------------------- DMS
+route('GET', '/api/documents', (req, res, params, url) => asApi(() => asApiListDocuments(req, url)), { permission: 'documents.view' });
+
+function asApiListDocuments(req, url) {
+  return listDocuments({
+    customerId: url.searchParams.get('customer_id'),
+    orderId: url.searchParams.get('order_id'),
+    invoiceId: url.searchParams.get('invoice_id'),
+    category: str(url.searchParams.get('category')),
+    q: str(url.searchParams.get('q')),
+    includeDeleted: url.searchParams.get('deleted') === '1' && can(req.user, 'settings.manage'),
+  });
+}
+
+route('POST', '/api/documents', (req) => asApi(() => {
+  const body = req.body ?? {};
+  const upload = decodeUpload(body);
+  if (body.order_id) assertOrderAccess(req.user, body.order_id);
+  if (body.customer_id) assertCustomerAccess(req.user, body.customer_id);
+  if (body.invoice_id && !db.prepare('SELECT 1 FROM invoices WHERE id = ?').get(body.invoice_id)) {
+    throw new HttpError(404, 'Rechnung nicht gefunden');
+  }
+  const document = storeDocument({
+    buffer: upload.buffer,
+    mime: upload.mime || str(body.mime),
+    originalName: str(body.filename) || str(body.original_name),
+    title: str(body.title),
+    category: str(body.category) || 'sonstiges',
+    customerId: body.customer_id ? num(body.customer_id) : null,
+    orderId: body.order_id ? num(body.order_id) : null,
+    invoiceId: body.invoice_id ? num(body.invoice_id) : null,
+    reportId: body.report_id ? num(body.report_id) : null,
+    note: str(body.note),
+    userId: req.user.id,
+    parentId: body.parent_id ? num(body.parent_id) : null,
+    ip: clientIp(req),
+  });
+  emitWebhook('document.uploaded', {
+    id: document.id, title: document.title, category: document.category,
+    order_id: document.order_id, customer_id: document.customer_id,
+  });
+  return document;
+}), { permission: 'documents.manage' });
+
+route('GET', '/api/documents/:id', (req, res, params) => asApi(() => {
+  const row = documentRow(params.id);
+  if (!row) throw new HttpError(404, 'Dokument nicht gefunden');
+  return { document: row, versions: documentVersions(row.id), events: documentEvents(row.id) };
+}), { permission: 'documents.view' });
+
+route('GET', '/api/documents/:id/file', (req, res, params) => asApi(() => {
+  const row = documentRow(params.id);
+  if (!row) throw new HttpError(404, 'Dokument nicht gefunden');
+  const path = documentFilePath(row);
+  if (!path) throw new HttpError(404, 'Datei nicht gefunden');
+  logDocumentEvent(row.id, req.user.id, 'download', row.original_name || row.title, clientIp(req));
+  return {
+    __file: path,
+    mime: row.mime || 'application/octet-stream',
+    filename: row.original_name || row.title,
+    disposition: 'attachment',
+  };
+}), { permission: 'documents.view' });
+
+route('GET', '/api/documents/:id/versions', (req, res, params) => asApi(() => {
+  const row = documentRow(params.id);
+  if (!row) throw new HttpError(404, 'Dokument nicht gefunden');
+  return documentVersions(row.id);
+}), { permission: 'documents.view' });
+
+route('POST', '/api/documents/:id/versions', (req, res, params) => asApi(() => {
+  const parent = documentRow(params.id);
+  if (!parent) throw new HttpError(404, 'Dokument nicht gefunden');
+  const body = req.body ?? {};
+  const upload = decodeUpload(body);
+  const document = storeDocument({
+    buffer: upload.buffer,
+    mime: upload.mime || str(body.mime),
+    originalName: str(body.filename) || parent.original_name,
+    title: str(body.title) || parent.title,
+    category: parent.category,
+    customerId: parent.customer_id,
+    orderId: parent.order_id,
+    invoiceId: parent.invoice_id,
+    reportId: parent.report_id,
+    note: str(body.note),
+    userId: req.user.id,
+    parentId: parent.id,
+    ip: clientIp(req),
+  });
+  return { document, versions: documentVersions(document.id) };
+}), { permission: 'documents.manage' });
+
+route('DELETE', '/api/documents/:id', (req, res, params) => asApi(() => {
+  const row = documentRow(params.id);
+  if (!row) throw new HttpError(404, 'Dokument nicht gefunden');
+  return softDeleteDocument(row.id, req.user.id, clientIp(req));
+}), { permission: 'documents.manage' });
+
+// ----------------------------------------------------------------- Kalkulation
+function assertCalculationAccess(user) {
+  if (!can(user, 'invoices.view')) throw new HttpError(403, 'Kalkulation ist nur für Finanzrollen sichtbar');
+}
+
+route('GET', '/api/orders/:id/calculation', (req, res, params) => asApi(() => {
+  assertCalculationAccess(req.user);
+  assertOrderAccess(req.user, params.id);
+  const result = orderCalculation(params.id);
+  if (!result) throw new HttpError(404, 'Auftrag nicht gefunden');
+  return result;
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('PUT', '/api/orders/:id/calculation', (req, res, params) => asApi(() => {
+  assertCalculationAccess(req.user);
+  assertOrderAccess(req.user, params.id);
+  const result = updateCalculation(params.id, req.body ?? {});
+  if (!result) throw new HttpError(404, 'Auftrag nicht gefunden');
+  return result;
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('POST', '/api/orders/:id/calculation/apply', (req, res, params) => asApi(() => {
+  assertCalculationAccess(req.user);
+  const order = assertOrderAccess(req.user, params.id);
+  const result = applyCalculation(order.id, req.body ?? {});
+  logActivity('kalkulation', `Kalkulation für ${order.number} in die Positionen übernommen.`);
+  return result;
+}), { permission: 'orders.manage' });
+
+// ----------------------------------------------------------------- Plantafel
+route('GET', '/api/planning/board', (req, res, params, url) => asApi(() => {
+  const board = planningBoard({ from: str(url.searchParams.get('from')), to: str(url.searchParams.get('to')) });
+  if (!can(req.user, 'planning.manage')) {
+    const employeeId = ownEmployeeId(req.user);
+    board.employees = board.employees.filter((row) => row.id === employeeId);
+    board.appointments = board.appointments.filter((row) => row.employee_id === employeeId);
+    board.absences = board.absences.filter((row) => row.employee_id === employeeId);
+    board.bookings = board.bookings.filter((row) => row.employee_id === employeeId);
+  }
+  return board;
+}), { permission: 'planning.view' });
+
+route('GET', '/api/resources', () => listResources(), { permission: 'planning.view' });
+route('POST', '/api/resources', (req) => asApi(() => createResource(req.body ?? {})), { permissions: ['planning.manage', 'resources.manage'] });
+route('PUT', '/api/resources/:id', (req, res, params) => asApi(() => updateResource(params.id, req.body ?? {})), { permissions: ['planning.manage', 'resources.manage'] });
+route('DELETE', '/api/resources/:id', (req, res, params) => asApi(() => deleteResource(params.id)), { permissions: ['planning.manage', 'resources.manage'] });
+
+route('GET', '/api/resource-bookings', (req, res, params, url) => asApi(() => {
+  const from = str(url.searchParams.get('from')) || addDays(todayISO(), -7);
+  const to = str(url.searchParams.get('to')) || addDays(todayISO(), 28);
+  const rows = db.prepare(
+    `SELECT b.*, r.name AS resource_name, r.type AS resource_type, r.color AS resource_color,
+       o.number AS order_number, o.title AS order_title, e.name AS employee_name
+     FROM resource_bookings b
+     JOIN resources r ON r.id = b.resource_id
+     LEFT JOIN orders o ON o.id = b.order_id
+     LEFT JOIN employees e ON e.id = b.employee_id
+     WHERE date(b.start_at) <= date(?) AND date(b.end_at) >= date(?)
+     ORDER BY b.start_at`
+  ).all(to, from);
+  if (can(req.user, 'planning.manage')) return rows;
+  const own = ownEmployeeId(req.user);
+  return rows.filter((row) => row.employee_id === own);
+}), { permission: 'planning.view' });
+
+route('POST', '/api/resource-bookings', (req) => asApi(() => {
+  const body = req.body ?? {};
+  if (body.order_id) assertOrderAccess(req.user, body.order_id);
+  return createBooking(body);
+}), { permission: 'planning.manage' });
+
+route('PUT', '/api/resource-bookings/:id', (req, res, params) => asApi(() =>
+  updateBooking(params.id, req.body ?? {})), { permission: 'planning.manage' });
+
+route('DELETE', '/api/resource-bookings/:id', (req, res, params) => asApi(() =>
+  deleteBooking(params.id)), { permission: 'planning.manage' });
+
+// ----------------------------------------------------------------- Personal
+route('GET', '/api/absences', (req, res, params, url) => asApi(() => {
+  const ownOnly = !can(req.user, 'hr.manage') && !can(req.user, 'time.view.all');
+  return {
+    absences: listAbsences({
+      employeeId: ownOnly ? ownEmployeeId(req.user) : (url.searchParams.get('employee_id') || null),
+      year: url.searchParams.get('year') || null,
+      status: str(url.searchParams.get('status')),
+      from: str(url.searchParams.get('from')),
+      to: str(url.searchParams.get('to')),
+    }),
+    types: ABSENCE_TYPES,
+    statuses: ABSENCE_STATUS,
+  };
+}), { permission: 'employees.view' });
+
+route('POST', '/api/absences', (req) => asApi(() => {
+  const body = { ...(req.body ?? {}) };
+  if (!can(req.user, 'hr.manage')) {
+    if (!req.user.employee_id) throw new HttpError(400, 'Dein Benutzerkonto ist keinem Mitarbeiter zugeordnet');
+    body.employee_id = req.user.employee_id;
+    delete body.status;
+  }
+  const absence = createAbsence(body, req.user.id);
+  logActivity('personal', `Abwesenheit (${ABSENCE_TYPES[absence.type]}) für ${absence.start_date} beantragt.`);
+  return absence;
+}), { permissions: ['time.own', 'hr.manage'] });
+
+route('POST', '/api/absences/:id/decide', (req, res, params) => asApi(() => {
+  const status = str(req.body?.status);
+  const absence = decideAbsence(params.id, status, req.user.id);
+  logActivity('personal', `Abwesenheit ${absence.id} ${ABSENCE_STATUS[absence.status]}.`);
+  return absence;
+}), { permission: 'hr.manage' });
+
+route('DELETE', '/api/absences/:id', (req, res, params) => asApi(() => {
+  const row = db.prepare('SELECT * FROM absences WHERE id = ?').get(params.id);
+  if (!row) throw new HttpError(404, 'Antrag nicht gefunden');
+  if (!can(req.user, 'hr.manage')) {
+    const own = row.employee_id === req.user.employee_id && row.status === 'beantragt';
+    if (!own) throw new HttpError(403, 'Dieser Antrag kann nicht gelöscht werden');
+  }
+  return deleteAbsence(row.id);
+}), { permissions: ['time.own', 'hr.manage'] });
+
+route('GET', '/api/hr/accounts', (req, res, params, url) => asApi(() => {
+  const year = Number(url.searchParams.get('year')) || new Date().getFullYear();
+  const employeeId = url.searchParams.get('employee_id');
+  if (!can(req.user, 'hr.manage')) {
+    const own = req.user.employee_id;
+    if (!own) throw new HttpError(403, 'Dein Benutzerkonto ist keinem Mitarbeiter zugeordnet');
+    if (employeeId && Number(employeeId) !== own) throw new HttpError(403, 'Nur das eigene Konto einsehbar');
+    return {
+      year,
+      vacation: vacationAccount(own, year),
+      overtime: overtimeAccount(own, {
+        from: `${year}-01-01`,
+        to: `${year}-12-31` > todayISO() ? todayISO() : `${year}-12-31`,
+      }),
+    };
+  }
+  const overview = hrOverview(year);
+  return { year, employees: overview };
+}), { permissions: ['hr.manage', 'time.own'] });
+
+route('GET', '/api/hr/my-account', (req, res, params, url) => asApi(() => {
+  if (!req.user.employee_id) throw new HttpError(400, 'Dein Benutzerkonto ist keinem Mitarbeiter zugeordnet');
+  const year = Number(url.searchParams.get('year')) || new Date().getFullYear();
+  return {
+    year,
+    vacation: vacationAccount(req.user.employee_id, year),
+    overtime: overtimeAccount(req.user.employee_id, {
+      from: `${year}-01-01`,
+      to: `${year}-12-31` > todayISO() ? todayISO() : `${year}-12-31`,
+    }),
+  };
+}), { permission: 'time.own' });
+
+route('PUT', '/api/vacation-entitlements', (req) => asApi(() => {
+  const body = req.body ?? {};
+  if (!body.employee_id) throw new HttpError(400, 'Bitte einen Mitarbeiter auswählen');
+  return setVacationEntitlement(body.employee_id, body.year || new Date().getFullYear(), body.days, body.note);
+}), { permission: 'hr.manage' });
+
+route('GET', '/api/time-adjustments', (req, res, params, url) => asApi(() => listAdjustments({
+  employeeId: url.searchParams.get('employee_id') || null,
+  from: str(url.searchParams.get('from')),
+  to: str(url.searchParams.get('to')),
+})), { permission: 'hr.manage' });
+
+route('POST', '/api/time-adjustments', (req) => asApi(() =>
+  createAdjustment(req.body ?? {}, req.user.id)), { permission: 'hr.manage' });
+
+// ----------------------------------------------------------------- Finanzen
+route('GET', '/api/finance/overview', () => asApi(() => financeOverview()), { permission: 'finance.view' });
+
+route('GET', '/api/finance/datev', (req, res, params, url) => asApi(() => {
+  const result = datevExport({ from: str(url.searchParams.get('from')), to: str(url.searchParams.get('to')) });
+  return {
+    __buffer: Buffer.from(result.content, 'utf8'),
+    mime: 'text/csv; charset=utf-8',
+    filename: result.filename,
+    disposition: 'attachment',
+  };
+}), { permission: 'finance.view' });
+
+route('GET', '/api/finance/bank', (req, res, params, url) => asApi(() => listBankTransactions({
+  from: str(url.searchParams.get('from')),
+  to: str(url.searchParams.get('to')),
+  status: str(url.searchParams.get('status')),
+  unmatched: url.searchParams.get('unmatched') === '1',
+  q: str(url.searchParams.get('q')),
+})), { permission: 'finance.view' });
+
+route('POST', '/api/finance/bank/import', (req) => asApi(() => {
+  const body = req.body ?? {};
+  let text = '';
+  if (body.content != null) text = String(body.content);
+  else if (body.dataUrl) {
+    const match = /^data:([^;]+);base64,(.+)$/i.exec(String(body.dataUrl));
+    if (!match) throw new HttpError(400, 'Ungültige Datei');
+    text = Buffer.from(match[2], 'base64').toString('utf8');
+  } else if (body.base64) text = Buffer.from(String(body.base64), 'base64').toString('utf8');
+  if (!text) throw new HttpError(400, 'Bitte eine CSV- oder CAMT-Datei übermitteln');
+  if (text.length > 8_000_000) throw new HttpError(400, 'Die Datei ist zu groß');
+  const result = importBankTransactions(text, { filename: str(body.filename), userId: req.user.id });
+  logActivity('finanzen', `${result.imported} Bankumsätze importiert (${result.skipped} Duplikate übersprungen).`);
+  return result;
+}), { permission: 'finance.manage' });
+
+route('POST', '/api/finance/bank/auto-match', () => asApi(() => autoMatchTransactions()), { permission: 'finance.manage' });
+
+route('POST', '/api/finance/bank/:id/book', (req, res, params) => asApi(() => {
+  const result = bookTransaction(params.id, {
+    invoiceId: req.body?.invoice_id,
+    userId: req.user.id,
+    note: str(req.body?.note),
+  });
+  emitWebhook('invoice.paid', { invoice_id: result.invoice.id, number: result.invoice.number, amount: result.transaction.amount });
+  return result;
+}), { permission: 'finance.manage' });
+
+route('POST', '/api/finance/bank/:id/unmatch', (req, res, params) => asApi(() =>
+  unmatchTransaction(params.id)), { permission: 'finance.manage' });
+
+route('GET', '/api/finance/sepa', (req, res, params, url) => asApi(() => {
+  const ids = str(url.searchParams.get('ids')).split(',').map(Number).filter(Boolean);
+  return sepaPreview(ids);
+}), { permission: 'finance.view' });
+
+route('POST', '/api/finance/sepa', (req) => asApi(() => {
+  const result = sepaExport({
+    invoiceIds: Array.isArray(req.body?.invoice_ids) ? req.body.invoice_ids : [],
+    executionDate: str(req.body?.execution_date),
+  });
+  logActivity('finanzen', `SEPA-Überweisung über ${result.total.toFixed(2)} € für ${result.count} Rechnungen erzeugt.`);
+  return {
+    __buffer: Buffer.from(result.content, 'utf8'),
+    mime: 'application/xml; charset=utf-8',
+    filename: result.filename,
+    disposition: 'attachment',
+  };
+}), { permission: 'finance.manage' });
+
+route('GET', '/api/finance/sepa/file', (req, res, params, url) => asApi(() => {
+  const ids = str(url.searchParams.get('ids')).split(',').map(Number).filter(Boolean);
+  const result = sepaExport({
+    invoiceIds: ids,
+    executionDate: str(url.searchParams.get('execution_date')),
+  });
+  logActivity('finanzen', `SEPA-Überweisung über ${result.total.toFixed(2)} € für ${result.count} Rechnungen erzeugt.`);
+  return {
+    __buffer: Buffer.from(result.content, 'utf8'),
+    mime: 'application/xml; charset=utf-8',
+    filename: result.filename,
+    disposition: 'attachment',
+  };
+}), { permission: 'finance.manage' });
+
+// ----------------------------------------------------------------- Aufmaß / Unterschrift / Checklisten / Bautagebuch
+route('GET', '/api/orders/:id/measurements', (req, res, params) => asApi(() => {
+  assertOrderAccess(req.user, params.id);
+  return { measurements: listMeasurements(params.id), categories: MEASUREMENT_CATEGORIES };
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('POST', '/api/orders/:id/measurements', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return createMeasurement(order.id, req.body ?? {}, req.user.id);
+}), { permission: 'orders.progress' });
+
+route('PUT', '/api/orders/:id/measurements/:measurementId', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return updateMeasurement(order.id, params.measurementId, req.body ?? {});
+}), { permission: 'orders.progress' });
+
+route('DELETE', '/api/orders/:id/measurements/:measurementId', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return deleteMeasurement(order.id, params.measurementId);
+}), { permission: 'orders.progress' });
+
+route('POST', '/api/orders/:id/measurements/apply', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const body = req.body ?? {};
+  const result = applyMeasurements(order.id, {
+    ids: Array.isArray(body.ids) ? body.ids : [],
+    kind: str(body.kind) || 'material',
+    unitPrice: num(body.unit_price),
+    roomSuffix: body.room_suffix !== false,
+  });
+  logActivity('aufmass', `${result.positions} Aufmaßpositionen in ${order.number} übernommen.`);
+  return result;
+}), { permission: 'orders.manage' });
+
+route('GET', '/api/orders/:id/signatures', (req, res, params) => asApi(() => {
+  assertOrderAccess(req.user, params.id);
+  return listSignatures(params.id);
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('POST', '/api/orders/:id/signatures', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const signature = saveSignature(order.id, req.body ?? {}, { userId: req.user.id, ip: clientIp(req) });
+  logActivity('unterschrift', `Auftrag ${order.number} digital unterschrieben (${signature.customer_name}).`);
+  return signature;
+}), { permission: 'orders.progress' });
+
+route('GET', '/api/signatures/:id/file', (req, res, params) => asApi(() => {
+  const row = signatureRow(params.id);
+  if (!row) throw new HttpError(404, 'Unterschrift nicht gefunden');
+  assertOrderAccess(req.user, row.order_id);
+  const path = signatureFilePath(row);
+  if (!path) throw new HttpError(404, 'Datei nicht gefunden');
+  return { __file: path, mime: 'image/png', filename: `Unterschrift-${row.customer_name}.png`, disposition: 'inline' };
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('GET', '/api/checklist-templates', () => asApi(() => checklistTemplates()), {
+  permissions: ['orders.view.all', 'orders.view.own', 'hr.manage'],
+});
+
+route('POST', '/api/checklist-templates', (req) => asApi(() => createChecklistTemplate(req.body ?? {})), {
+  permissions: ['orders.manage', 'hr.manage'],
+});
+
+route('PUT', '/api/checklist-templates/:id', (req, res, params) => asApi(() =>
+  updateChecklistTemplate(params.id, req.body ?? {})), { permissions: ['orders.manage', 'hr.manage'] });
+
+route('DELETE', '/api/checklist-templates/:id', (req, res, params) => asApi(() =>
+  deleteChecklistTemplate(params.id)), { permissions: ['orders.manage', 'hr.manage'] });
+
+route('GET', '/api/orders/:id/checklists', (req, res, params) => asApi(() => {
+  assertOrderAccess(req.user, params.id);
+  return { checklists: orderChecklists(params.id), templates: checklistTemplates().filter((row) => row.active) };
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('POST', '/api/orders/:id/checklists', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const body = req.body ?? {};
+  return createOrderChecklist(order.id, {
+    templateId: body.template_id ?? body.templateId ?? null,
+    name: str(body.name),
+    items: Array.isArray(body.items) ? body.items : null,
+  }, req.user.id);
+}), { permission: 'orders.progress' });
+
+route('PUT', '/api/checklists/:id/entries/:entryId', (req, res, params) => asApi(() => {
+  const checklist = db.prepare('SELECT * FROM order_checklists WHERE id = ?').get(params.id);
+  if (!checklist) throw new HttpError(404, 'Checkliste nicht gefunden');
+  assertOrderAccess(req.user, checklist.order_id);
+  return updateChecklistEntry(checklist.id, params.entryId, req.body ?? {}, req.user.id);
+}), { permission: 'orders.progress' });
+
+route('POST', '/api/checklists/:id/entries', (req, res, params) => asApi(() => {
+  const checklist = db.prepare('SELECT * FROM order_checklists WHERE id = ?').get(params.id);
+  if (!checklist) throw new HttpError(404, 'Checkliste nicht gefunden');
+  assertOrderAccess(req.user, checklist.order_id);
+  return addChecklistEntry(checklist.id, req.body?.label);
+}), { permission: 'orders.progress' });
+
+route('DELETE', '/api/checklists/:id', (req, res, params) => asApi(() => {
+  const checklist = db.prepare('SELECT * FROM order_checklists WHERE id = ?').get(params.id);
+  if (!checklist) throw new HttpError(404, 'Checkliste nicht gefunden');
+  assertOrderAccess(req.user, checklist.order_id);
+  return deleteChecklist(checklist.id);
+}), { permission: 'orders.manage' });
+
+route('GET', '/api/orders/:id/diary', (req, res, params) => asApi(() => {
+  assertOrderAccess(req.user, params.id);
+  return listDiary(params.id);
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('POST', '/api/orders/:id/diary', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return createDiaryEntry(order.id, req.body ?? {}, req.user.id);
+}), { permission: 'orders.progress' });
+
+route('PUT', '/api/orders/:id/diary/:entryId', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return updateDiaryEntry(order.id, params.entryId, req.body ?? {});
+}), { permission: 'orders.progress' });
+
+route('DELETE', '/api/orders/:id/diary/:entryId', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return deleteDiaryEntry(order.id, params.entryId);
+}), { permission: 'orders.progress' });
+
+route('GET', '/api/orders/:id/site', (req, res, params) => asApi(() => {
+  assertOrderAccess(req.user, params.id);
+  return siteSummary(params.id);
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+// ----------------------------------------------------------------- Inventur & Scan
+route('GET', '/api/articles/lookup', (req, res, params, url) => asApi(() => {
+  const code = str(url.searchParams.get('code'));
+  if (!code) throw new HttpError(400, 'Bitte einen Code scannen oder eingeben');
+  const article = lookupArticleByCode(code);
+  return { article, code };
+}), { permission: 'warehouse.view' });
+
+route('GET', '/api/inventory', () => asApi(() => listInventorySessions()), { permission: 'warehouse.view' });
+
+route('POST', '/api/inventory', (req) => asApi(() =>
+  createInventorySession({ ...(req.body ?? {}), userId: req.user.id })), { permission: 'warehouse.manage' });
+
+route('GET', '/api/inventory/:id', (req, res, params) => asApi(() => {
+  const result = inventorySession(params.id);
+  if (!result) throw new HttpError(404, 'Inventur nicht gefunden');
+  return result;
+}), { permission: 'warehouse.view' });
+
+route('POST', '/api/inventory/:id/count', (req, res, params) => asApi(() =>
+  saveInventoryCount(params.id, {
+    articleId: req.body?.article_id,
+    code: str(req.body?.code),
+    counted: req.body?.counted,
+    note: str(req.body?.note),
+  }, req.user.id)), { permission: 'warehouse.manage' });
+
+route('POST', '/api/inventory/:id/close', (req, res, params) => asApi(() => {
+  const result = closeInventorySession(params.id, req.user.id);
+  logActivity('lager', `Inventur „${result.session.name}" abgeschlossen.`);
+  return result;
+}), { permission: 'warehouse.manage' });
+
+route('DELETE', '/api/inventory/:id', (req, res, params) => asApi(() =>
+  deleteInventorySession(params.id)), { permission: 'warehouse.manage' });
+
+// ----------------------------------------------------------------- GAEB / OCI
+route('GET', '/api/orders/:id/gaeb', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY sort, id').all(order.id);
+  const xml = exportGaeb(order, items);
+  return {
+    __buffer: Buffer.from(xml, 'utf8'),
+    mime: 'application/xml; charset=utf-8',
+    filename: `${String(order.number || 'LV').replace(/[^A-Za-z0-9._-]+/g, '-')}.x83`,
+    disposition: 'attachment',
+  };
+}), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('POST', '/api/orders/:id/gaeb/import', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const text = str(req.body?.content);
+  if (!text) throw new HttpError(400, 'Bitte eine GAEB-Datei übermitteln');
+  const result = importGaebToOrder(order.id, text, { replace: bodyBoolean(req.body?.replace) });
+  logActivity('gaeb', `${result.count} GAEB-Positionen in ${order.number} importiert.`);
+  return result;
+}), { permission: 'orders.manage' });
+
+route('POST', '/api/orders/:id/oci/import', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const text = str(req.body?.content);
+  if (!text) throw new HttpError(400, 'Bitte eine OCI-Bestellung übermitteln');
+  const result = importOciToOrder(order.id, text);
+  logActivity('oci', `${result.count} OCI-Positionen in ${order.number} importiert.`);
+  return result;
+}), { permission: 'orders.manage' });
+
+// ----------------------------------------------------------------- Webhooks & API-Doku
+route('GET', '/api/webhooks', () => asApi(() => ({ webhooks: listWebhooks() })), { permission: 'settings.manage' });
+route('POST', '/api/webhooks', (req) => asApi(() => createWebhook(req.body ?? {})), { permission: 'settings.manage' });
+route('PUT', '/api/webhooks/:id', (req, res, params) => asApi(() =>
+  updateWebhook(params.id, req.body ?? {})), { permission: 'settings.manage' });
+route('DELETE', '/api/webhooks/:id', (req, res, params) => asApi(() => deleteWebhook(params.id)), { permission: 'settings.manage' });
+route('GET', '/api/webhooks/:id/deliveries', (req, res, params) => asApi(() =>
+  webhookDeliveries(params.id)), { permission: 'settings.manage' });
+route('POST', '/api/webhooks/:id/test', async (req, res, params) => asApi(async () =>
+  testWebhook(params.id)), { permission: 'settings.manage' });
+
+route('GET', '/api/openapi.json', (req) => ({
+  ...openapiDocument(publicBaseUrl(req)),
+  paths: openapiDocument().paths,
+}), { authenticated: true });
+
+// ----------------------------------------------------------------- Textassistent
+route('POST', '/api/assistant/draft', (req) => asApi(() => {
+  const body = req.body ?? {};
+  const kind = ['angebot', 'mahnung', 'zusammenfassung', 'checkliste', 'email'].includes(str(body.kind))
+    ? str(body.kind) : 'angebot';
+  if (body.order_id) assertOrderAccess(req.user, body.order_id);
+  return draftText({
+    kind,
+    orderId: body.order_id ? num(body.order_id) : null,
+    invoiceId: body.invoice_id ? num(body.invoice_id) : null,
+    customerId: body.customer_id ? num(body.customer_id) : null,
+    extra: str(body.extra),
+  });
+}), { permission: 'assistant.use' });
+
 // ----------------------------------------------------------------- Router
 export async function handleApi(req, res, url) {
   const segments = url.pathname.split('/').filter(Boolean);
@@ -2616,6 +3341,16 @@ export async function handleApi(req, res, url) {
         res.end(result.__pdf);
         return true;
       }
+      if (result.__buffer) {
+        res.writeHead(200, {
+          'Content-Type': result.mime || 'application/octet-stream',
+          'Content-Disposition': `${result.disposition || 'attachment'}; filename="${String(result.filename || 'datei').replace(/["\r\n]/g, '')}"`,
+          'Content-Length': result.__buffer.length,
+          'Cache-Control': 'no-store',
+        });
+        res.end(result.__buffer);
+        return true;
+      }
       if (result.__file) {
         if (!existsSync(result.__file)) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2625,8 +3360,10 @@ export async function handleApi(req, res, url) {
         const buffer = readFileSync(result.__file);
         res.writeHead(200, {
           'Content-Type': result.mime || 'application/octet-stream',
+          'Content-Disposition': `${result.disposition || 'inline'}; filename="${String(result.filename || 'datei').replace(/["\r\n]/g, '')}"`,
           'Content-Length': buffer.length,
           'Cache-Control': 'private, max-age=3600',
+          'X-Content-Type-Options': 'nosniff',
         });
         res.end(buffer);
         return true;

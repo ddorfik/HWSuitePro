@@ -21,6 +21,8 @@ const state = {
   ordersFilter: 'offen',
   invoicesFilter: 'offen',
   customersFilter: 'alle',
+  documentsFilter: 'alle',
+  financeTab: 'bank',
   warehouseFilter: 'alle',
   contractsFilter: 'aktiv',
   reportsFilter: 'alle',
@@ -345,7 +347,9 @@ const PAGES = {
   orders: { title: 'Aufträge & Angebote', sub: 'Aufträge planen, bearbeiten und abrechnen', primary: { label: 'Neuer Auftrag', action: 'new-order', permission: 'orders.manage' }, render: renderOrders },
   planning: { title: 'Einsatzplanung / Kalender', sub: 'Wochenplan für Monteure, Büro und Chef', primary: { label: 'Termin anlegen', action: 'new-appointment', permission: 'planning.manage' }, render: renderPlanning },
   customers: { title: 'Kunden & Objekte', sub: 'Stammdaten und Historie', primary: { label: 'Neuer Kunde', action: 'new-customer', permission: 'customers.manage' }, render: renderCustomers },
-  invoices: { title: 'Rechnungen', sub: 'Rechnungen, Zahlungen und Mahnwesen', primary: { label: 'CSV-Export', action: 'export-invoices', permission: 'exports.run' }, render: renderInvoices },
+  invoices: { title: 'Rechnungen', sub: 'Rechnungen, Zahlungen, Mahnwesen und E-Rechnung', primary: { label: 'CSV-Export', action: 'export-invoices', permission: 'exports.run' }, render: renderInvoices },
+  finance: { title: 'Finanzen', sub: 'DATEV, Bankabgleich und SEPA-Überweisungen', primary: { label: 'Bank importieren', action: 'import-bank', permission: 'finance.manage' }, render: renderFinance },
+  documents: { title: 'Dokumente', sub: 'GoBD-Ablage, Versionen und Akten', primary: { label: 'Dokument ablegen', action: 'upload-document', permission: 'documents.manage' }, render: renderDocuments },
   contracts: { title: 'Wartungsverträge', sub: 'Wiederkehrende Aufträge automatisch erzeugen', primary: { label: 'Neuer Vertrag', action: 'new-contract', permission: 'contracts.manage' }, render: renderContracts },
   warehouse: { title: 'Material & Lager', sub: 'Bestände, Mindestbestände und Buchungen', primary: { label: 'Neuer Artikel', action: 'new-article', permission: 'warehouse.manage' }, render: renderWarehouse },
   team: { title: 'Personal & Team', sub: 'Mitarbeiter, Zeiten und Auslastung', primary: { label: 'Mitarbeiter anlegen', action: 'new-employee', permission: 'employees.manage' }, render: renderTeam },
@@ -361,6 +365,8 @@ const PAGE_GUARDS = {
   planning: () => can('planning.view'),
   customers: () => can('customers.view'),
   invoices: () => can('invoices.view'),
+  finance: () => can('finance.view'),
+  documents: () => can('documents.view'),
   contracts: () => can('contracts.view'),
   warehouse: () => can('warehouse.view'),
   team: () => can('employees.view'),
@@ -935,6 +941,7 @@ async function renderOrders() {
 
 async function openOrder(orderId) {
   const data = await api.get(`/api/orders/${orderId}`);
+  const site = await api.get(`/api/orders/${orderId}/site`).catch(() => null);
   const {
     order, customer, property, employee, items = [], invoice,
     totals = { subtotal: 0, tax: 0, total: 0 }, appointments = [], reports = [], photos = [], time = [],
@@ -1010,6 +1017,23 @@ async function openOrder(orderId) {
     </div>
 
     ${phoneLinks(customer) ? `<div class="contact-row">${phoneLinks(customer)}</div>` : ''}
+
+    <div class="subcard">
+      <div class="section-head compact">
+        <div><h4>Projektakte</h4><div class="small muted">Aufmaß, Checklisten, Bautagebuch, Unterschrift und Dokumente</div></div>
+        <div class="small muted">${site ? `${site.measurements.length} Aufmaß · ${site.checklists.length} Listen · ${site.signatures.length} Unterschriften · ${site.diary.length} Tagebuch` : ''}</div>
+      </div>
+      <div class="tech-actions">
+        ${canMoney ? `<button class="tech-btn" type="button" data-action="order-calculation" data-id="${order.id}">${icon('euro')}<span>Kalkulation</span></button>` : ''}
+        <button class="tech-btn" type="button" data-action="order-measurements" data-id="${order.id}">${icon('edit')}<span>Aufmaß</span>${site?.measurements.length ? `<em>${site.measurements.length}</em>` : ''}</button>
+        <button class="tech-btn" type="button" data-action="order-checklists" data-id="${order.id}">${icon('check')}<span>Checklisten</span>${site?.checklists.length ? `<em>${site.checklist_percent}%</em>` : ''}</button>
+        <button class="tech-btn" type="button" data-action="order-diary" data-id="${order.id}">${icon('file')}<span>Bautagebuch</span>${site?.diary.length ? `<em>${site.diary.length}</em>` : ''}</button>
+        ${canProgress ? `<button class="tech-btn" type="button" data-action="order-signature" data-id="${order.id}">${icon('edit')}<span>Unterschrift</span></button>` : ''}
+        ${can('documents.view') ? `<button class="tech-btn" type="button" data-action="order-documents" data-id="${order.id}">${icon('file')}<span>Dokumente</span></button>` : ''}
+        ${canMoney ? `<button class="tech-btn" type="button" data-action="order-gaeb" data-id="${order.id}">${icon('download')}<span>GAEB / OCI</span></button>` : ''}
+        ${can('assistant.use') ? `<button class="tech-btn" type="button" data-action="assistant" data-kind="angebot" data-id="${order.id}">${icon('mic')}<span>Textassistent</span></button>` : ''}
+      </div>
+    </div>
 
     ${order.description ? `<hr class="hr"><div class="small" style="line-height:1.6">${esc(order.description)}</div>` : ''}
 
@@ -1382,6 +1406,12 @@ async function openInvoice(invoiceId) {
       <div class="meta-item"><div class="k">Auftrag</div><div class="v">${esc(order?.number || '–')}<small>${esc(order?.title || '')}</small></div></div>
     </div>
 
+    <div class="einvoice-bar">
+      <span class="badge ${invoice.einvoice_status === 'versendet' ? 'bezahlt' : 'neutral'}">E-Rechnung: ${esc(invoice.einvoice_status || 'entwurf')}</span>
+      <span class="small muted">Leitweg-ID / Buyer Reference: <b>${esc(invoice.buyer_reference || customer.leitweg_id || '–')}</b></span>
+      ${can('invoices.manage') ? `<button class="btn sm ghost" type="button" data-action="edit-einvoice" data-id="${invoice.id}">${icon('edit')} Referenz</button>` : ''}
+    </div>
+
     <div class="subcard">
       <h4>Positionen</h4>
       <div class="table-wrap">
@@ -1426,12 +1456,17 @@ async function openInvoice(invoiceId) {
   const footer = `
     <div class="left">
       <button class="btn sm" type="button" data-action="invoice-pdf" data-id="${invoice.id}">${icon('file')} PDF</button>
+      <button class="btn sm" type="button" data-action="invoice-einvoice" data-id="${invoice.id}" data-format="xrechnung">${icon('download')} XRechnung</button>
+      <button class="btn sm" type="button" data-action="invoice-einvoice" data-id="${invoice.id}" data-format="zugferd">${icon('download')} ZUGFeRD</button>
       ${invoice.dunning_level ? `<button class="btn sm" type="button" data-action="invoice-pdf" data-id="${invoice.id}" data-mahnung="1">${icon('download')} Mahnung</button>` : ''}
       ${canDun ? `<button class="btn sm" type="button" data-action="dunning-invoice" data-id="${invoice.id}">${icon('send')} Mahnen</button>` : ''}
       ${invoice.status === 'storniert' ? '' : `<button class="btn sm danger" type="button" data-action="storno-invoice" data-id="${invoice.id}">Storno</button>`}
     </div>
-    ${invoice.status === 'storniert' || open <= 0.01 ? '' : `<button class="btn primary" type="button" data-action="payment-invoice" data-id="${invoice.id}">${icon('euro')} Zahlung erfassen</button>`}
-    <button class="btn" type="button" data-action="close-modal">Schließen</button>`;
+    <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+      ${can('assistant.use') ? `<button class="btn" type="button" data-action="assistant" data-kind="mahnung" data-invoice="${invoice.id}">${icon('mic')} Textassistent</button>` : ''}
+      ${invoice.status === 'storniert' || open <= 0.01 ? '' : `<button class="btn primary" type="button" data-action="payment-invoice" data-id="${invoice.id}">${icon('euro')} Zahlung erfassen</button>`}
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+    </div>`;
 
   openModal({
     title: `Rechnung ${invoice.number}`,
@@ -1858,6 +1893,8 @@ async function renderWarehouse() {
       </div>
       <div class="spacer"></div>
       ${canBook && importSources.length ? `<button class="btn sm" type="button" data-action="open-import">${icon('download')} Katalog importieren</button>` : ''}
+      ${canBook ? `<button class="btn sm ghost" type="button" data-action="scan-article">${icon('search')} Scannen</button>` : ''}
+      ${canBook ? `<button class="btn sm ghost" type="button" data-action="open-inventory">${icon('box')} Inventur</button>` : ''}
       ${canBook ? `<button class="btn sm ghost" type="button" data-action="open-lookup">${icon('search')} Material suchen</button>` : ''}
       <button class="btn sm ghost" type="button" data-action="open-import-history">${icon('clock')} Importe</button>
       ${showCosts ? `<span class="muted small">Lagerwert: <b style="color:var(--ink)">${money(stockValue)}</b></span>` : ''}
@@ -2392,7 +2429,12 @@ async function renderPlanning() {
     end = new Date(start);
     end.setDate(end.getDate() + 6);
   }
-  const appointments = await api.get(`/api/appointments?from=${toDateInput(start)}&to=${toDateInput(end)}`);
+  const board = mode === 'board'
+    ? await api.get(`/api/planning/board?from=${toDateInput(start)}&to=${toDateInput(end)}`)
+    : null;
+  const appointments = board
+    ? board.appointments
+    : await api.get(`/api/appointments?from=${toDateInput(start)}&to=${toDateInput(end)}`);
   const term = state.search.toLowerCase();
   const visible = term
     ? appointments.filter((a) => `${a.title} ${a.order_number || ''} ${customerName(a)} ${a.employee_name || ''} ${kindLabel(a.kind)}`.toLowerCase().includes(term))
@@ -2488,6 +2530,71 @@ async function renderPlanning() {
       }).join('')}
     </div>`;
 
+  const boardHtml = board ? `
+    <div class="toolbar" style="padding:12px 14px 0">
+      <div class="small muted">${board.employees.length} Mitarbeiter · ${board.resources.length} Ressourcen · Plantafel mit Kapazitätsprüfung</div>
+      <div class="spacer"></div>
+      ${can('planning.manage') ? `<button class="btn sm" type="button" data-action="new-resource">${icon('plus')} Ressource</button>` : ''}
+      <button class="btn sm ghost" type="button" data-action="resource-list">${icon('box')} Verwalten</button>
+    </div>
+    <div class="board-scroll">
+      <table class="plantafel">
+        <thead>
+          <tr>
+            <th class="pt-name">Team / Ressource</th>
+            ${days.map((date) => {
+              const key = toDateInput(date);
+              return `<th class="${key === todayKey ? 'today' : ''}">
+                <span>${date.toLocaleDateString('de-DE', { weekday: 'short' })}</span>
+                <b>${date.getDate()}.${date.getMonth() + 1}.</b>
+              </th>`;
+            }).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${board.employees.map((employee) => `
+            <tr>
+              <th class="pt-name">
+                <span class="legend-dot" style="background:${esc(employee.color || '#0f766e')}"></span>
+                <span><b>${esc(employee.name)}</b><small>${esc(employee.role || '')} · ${Number(employee.weekly_hours || 40)} Std.</small></span>
+              </th>
+              ${days.map((date) => {
+                const key = toDateInput(date);
+                const absences = board.absences.filter((row) => row.employee_id === employee.id
+                  && row.start_date <= key && row.end_date >= key);
+                const events = board.appointments.filter((row) => row.employee_id === employee.id
+                  && toDateInput(row.start_at) === key);
+                return `<td class="pt-cell ${key === todayKey ? 'today' : ''}">
+                  ${absences.map((row) => `<span class="pt-chip absence">${esc(row.type === 'urlaub' ? 'Urlaub' : 'Abwesend')}</span>`).join('')}
+                  ${events.map((row) => `<button class="pt-chip appt" type="button" data-action="open-appointment" data-id="${row.id}" title="${esc(row.title)}">
+                    <span>${fmtTime(row.start_at)}</span>${esc(row.order_title || row.title)}
+                  </button>`).join('')}
+                  ${can('planning.manage') && !events.length ? `<button class="pt-add" type="button" data-action="new-appointment" data-date="${key}" title="Termin anlegen">+</button>` : ''}
+                </td>`;
+              }).join('')}
+            </tr>`).join('')}
+          ${board.resources.map((resource) => `
+            <tr class="resource-row">
+              <th class="pt-name">
+                <span class="resource-dot" style="background:${esc(resource.color || '#0f766e')}">${icon(resource.type === 'werkzeug' ? 'edit' : resource.type === 'maschine' ? 'refresh' : 'box')}</span>
+                <span><b>${esc(resource.name)}</b><small>${esc(resource.type_label)}${resource.identifier ? ` · ${esc(resource.identifier)}` : ''}</small></span>
+              </th>
+              ${days.map((date) => {
+                const key = toDateInput(date);
+                const bookings = board.bookings.filter((row) => row.resource_id === resource.id
+                  && toDateInput(row.start_at) === key);
+                return `<td class="pt-cell ${key === todayKey ? 'today' : ''}">
+                  ${bookings.map((row) => `<button class="pt-chip resource" type="button" data-action="edit-booking" data-id="${row.id}" title="${esc(row.order_number || '')} ${esc(row.note || '')}">
+                    <span>${fmtTime(row.start_at)}</span>${esc(row.order_number || row.note || 'Belegung')}
+                  </button>`).join('')}
+                  ${can('planning.manage') ? `<button class="pt-add" type="button" data-action="new-booking" data-resource="${resource.id}" data-date="${key}" title="Ressource einplanen">+</button>` : ''}
+                </td>`;
+              }).join('')}
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>` : '';
+
   view.innerHTML = `
     <div class="toolbar">
       <div class="chips">
@@ -2503,6 +2610,7 @@ async function renderPlanning() {
       <div class="view-switch">
         <button class="chip ${mode === 'week' ? 'active' : ''}" data-action="calendar-mode" data-mode="week">Woche</button>
         <button class="chip ${mode === 'month' ? 'active' : ''}" data-action="calendar-mode" data-mode="month">Monat</button>
+        <button class="chip ${mode === 'board' ? 'active' : ''}" data-action="calendar-mode" data-mode="board">Plantafel</button>
       </div>
     </div>
     <div class="card">
@@ -2517,7 +2625,7 @@ async function renderPlanning() {
           <button class="btn sm" data-action="calendar-next">›</button>
         </div>
       </div>
-      ${mode === 'month' ? monthHtml : weekHtml}
+      ${mode === 'board' ? boardHtml : mode === 'month' ? monthHtml : weekHtml}
       <div class="cal-legend">
         ${state.employees.filter((e) => e.active).map((employee) => `
           <span class="legend-item"><span class="legend-dot" style="background:${esc(employee.color)}"></span>${esc(employee.name)}</span>`).join('')}
@@ -3160,6 +3268,16 @@ async function renderTeam() {
     });
   }
   const pending = can('reports.view.all') ? await api.get('/api/reports?status=eingereicht') : [];
+  const year = new Date().getFullYear();
+  const accounts = can('hr.manage')
+    ? await api.get(`/api/hr/accounts?year=${year}`).catch(() => null)
+    : null;
+  const myAccount = !accounts && can('time.own')
+    ? await api.get(`/api/hr/my-account?year=${year}`).catch(() => null)
+    : null;
+  const absenceData = await api.get(`/api/absences?year=${year}`).catch(() => ({ absences: [] }));
+  const absences = absenceData.absences || [];
+  const openAbsences = absences.filter((row) => row.status === 'beantragt');
 
   view.innerHTML = `
     <div class="kpi-grid tight">
@@ -3204,6 +3322,65 @@ async function renderTeam() {
         </div>`).join('')}
     </div>
 
+    <div class="card" style="margin-top:18px">
+      <div class="card-head">
+        <div><h2>Urlaub & Arbeitszeit ${year}</h2><div class="sub">Resturlaub, Überstunden und offene Anträge</div></div>
+        ${can('time.own') ? `<button class="btn sm" type="button" data-action="request-absence">${icon('plus')} Urlaub beantragen</button>` : ''}
+      </div>
+      <div class="card-body">
+        ${accounts ? `
+          <div class="table-wrap"><table>
+            <thead><tr><th>Mitarbeiter</th><th class="right">Anspruch</th><th class="right">Genehmigt</th><th class="right">Offen</th><th class="right">Rest</th><th class="right">Überstunden</th><th class="right"></th></tr></thead>
+            <tbody>${accounts.employees.map((employee) => `
+              <tr>
+                <td><b>${esc(employee.name)}</b><div class="cell-sub">${esc(employee.role || '')} · ${Number(employee.weekly_hours || 40)} Std./Woche</div></td>
+                <td class="right num">${num2(employee.vacation.entitled)}</td>
+                <td class="right num">${num2(employee.vacation.approved)}</td>
+                <td class="right num">${num2(employee.vacation.pending)}</td>
+                <td class="right num"><b>${num2(employee.vacation.remaining)}</b></td>
+                <td class="right"><span class="badge ${employee.overtime_hours >= 0 ? 'bezahlt' : 'overdue'}">${employee.overtime_hours >= 0 ? '+' : ''}${num2(employee.overtime_hours)} Std.</span></td>
+                <td class="right nowrap">
+                  <button class="icon-btn" type="button" data-action="hr-account" data-id="${employee.id}" title="Arbeitszeitkonto">${icon('clock')}</button>
+                  <button class="icon-btn" type="button" data-action="request-absence" data-id="${employee.id}" title="Urlaub eintragen">${icon('plus')}</button>
+                  <button class="icon-btn" type="button" data-action="time-adjustment" data-id="${employee.id}" title="Korrektur buchen">${icon('edit')}</button>
+                  <button class="icon-btn" type="button" data-action="vacation-entitlement" data-id="${employee.id}" title="Urlaubsanspruch">${icon('check')}</button>
+                </td>
+              </tr>`).join('')}</tbody>
+          </table></div>`
+        : myAccount ? `
+          <div class="kpi-grid tight">
+            <div class="kpi"><div class="label">Resturlaub</div><div class="value">${num2(myAccount.vacation.remaining)}</div><div class="foot">von ${num2(myAccount.vacation.entitled)} Tagen</div></div>
+            <div class="kpi"><div class="label">Offene Anträge</div><div class="value">${num2(myAccount.vacation.pending)}</div><div class="foot">Tage beantragt</div></div>
+            <div class="kpi"><div class="label">Arbeitszeitkonto</div><div class="value">${myAccount.overtime.balance_hours >= 0 ? '+' : ''}${num2(myAccount.overtime.balance_hours)}</div><div class="foot">Stunden</div></div>
+          </div>`
+        : '<div class="small muted">Keine Konten sichtbar.</div>'}
+        ${openAbsences.length ? `
+          <div class="hr"></div>
+          <div class="section-head compact"><div><h3>Offene Anträge</h3></div></div>
+          <div class="list-stack">${openAbsences.map((row) => `
+            <div class="list-row static">
+              <span class="list-ico">${icon('calendar')}</span>
+              <span class="list-main"><b>${esc(row.employee_name)} · ${esc(row.type_label)}</b>
+                <small>${fmtDate(row.start_date)} – ${fmtDate(row.end_date)} · ${num2(row.days)} Tage${row.note ? ` · ${esc(row.note)}` : ''}</small></span>
+              <span class="lr-actions">
+                ${can('hr.manage') ? `
+                  <button class="btn sm" type="button" data-action="decide-absence" data-id="${row.id}" data-status="genehmigt">Genehmigen</button>
+                  <button class="btn sm danger" type="button" data-action="decide-absence" data-id="${row.id}" data-status="abgelehnt">Ablehnen</button>` : `<span class="badge ${esc(row.status)}">${esc(row.status_label)}</span>`}
+              </span>
+            </div>`).join('')}</div>` : ''}
+        ${absences.length ? `
+          <div class="hr"></div>
+          <div class="section-head compact"><div><h3>Abwesenheiten ${year}</h3></div></div>
+          <div class="list-stack">${absences.slice(0, 12).map((row) => `
+            <div class="list-row static">
+              <span class="list-ico">${icon('calendar')}</span>
+              <span class="list-main"><b>${esc(row.employee_name)} · ${esc(row.type_label)}</b>
+                <small>${fmtDate(row.start_date)} – ${fmtDate(row.end_date)} · ${num2(row.days)} Tage</small></span>
+              <span class="badge ${row.status === 'genehmigt' ? 'bezahlt' : row.status === 'abgelehnt' ? 'storniert' : 'offen'}">${esc(row.status_label)}</span>
+            </div>`).join('')}</div>` : ''}
+      </div>
+    </div>
+
     ${pending.length ? `
       <div class="card" style="margin-top:18px">
         <div class="card-head"><div><h2>Berichte zur Freigabe</h2><div class="sub">Eingereicht von Monteuren</div></div></div>
@@ -3228,6 +3405,10 @@ function employeeEditForm(employeeId = null) {
       { name: 'role', label: 'Funktion', default: employee?.role || 'Monteur' },
       { name: 'phone', label: 'Telefon', default: employee?.phone || '' },
       { name: 'rate', label: 'Stundensatz (€)', type: 'number', step: '0.01', min: 0, default: employee?.rate ?? '' },
+      { name: 'weekly_hours', label: 'Wochenstunden', type: 'number', step: '0.5', min: 0, default: employee?.weekly_hours ?? 40 },
+      { name: 'vacation_days', label: 'Urlaubsanspruch (Tage/Jahr)', type: 'number', step: '0.5', min: 0, default: employee?.vacation_days ?? 30 },
+      { name: 'entry_date', label: 'Eintrittsdatum', type: 'date', default: employee?.entry_date || '' },
+      { name: 'exit_date', label: 'Austrittsdatum', type: 'date', default: employee?.exit_date || '' },
       { name: 'color', label: 'Farbe', type: 'color', default: employee?.color || '#0f766e' },
       { name: 'active', label: 'Aktiv', type: 'checkbox', default: employee ? employee.active : 1, checkLabel: 'Mitarbeiter ist aktiv' },
     ],
@@ -3821,6 +4002,10 @@ async function renderSettings() {
   const materialData = can('settings.manage')
     ? await api.get('/api/materials/sources').catch(() => ({ sources: [] }))
     : { sources: [] };
+  const webhookData = can('settings.manage')
+    ? await api.get('/api/webhooks').catch(() => ({ webhooks: [] }))
+    : { webhooks: [] };
+  const checklistData = await api.get('/api/checklist-templates').catch(() => []);
   const demoAccounts = security.demo_accounts || [];
   const insecureNetwork = security.https === false
     && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
@@ -4012,6 +4197,89 @@ async function renderSettings() {
           </div>
         </div>
 
+        <div class="card form-card">
+          <h2>E-Rechnung</h2>
+          <div class="fc-sub">XRechnung 3.0 (UBL) und ZUGFeRD 2.x (CII) – inkl. eingebettetem XML im PDF.</div>
+          <div class="form-grid">
+            <div class="field"><label>Standardformat</label><select name="einvoice_format">
+              <option value="xrechnung" ${settings.einvoice_format === 'xrechnung' ? 'selected' : ''}>XRechnung (XML)</option>
+              <option value="zugferd" ${settings.einvoice_format === 'zugferd' ? 'selected' : ''}>ZUGFeRD (PDF + XML)</option>
+            </select></div>
+            <div class="field"><label>Zahlungsart</label><select name="einvoice_payment_means">
+              <option value="58" ${settings.einvoice_payment_means === '58' ? 'selected' : ''}>58 – SEPA-Überweisung</option>
+              <option value="30" ${settings.einvoice_payment_means === '30' ? 'selected' : ''}>30 – Überweisung</option>
+            </select></div>
+            ${input('einvoice_seller_contact', 'Ansprechpartner (BT-41)')}
+            ${input('einvoice_seller_phone', 'Telefon (BT-42)')}
+            ${input('einvoice_seller_email', 'E-Mail (BT-43)', { full: true })}
+            <div class="field full"><label>Hinweis / Fußtext</label><textarea name="einvoice_note" rows="2">${esc(settings.einvoice_note || '')}</textarea></div>
+          </div>
+          <label class="check" style="margin-top:10px"><input type="checkbox" name="small_business" ${settings.small_business === '1' ? 'checked' : ''} /> Kleinunternehmer nach § 19 UStG (steuerbefreite Rechnungen)</label>
+          <div class="small muted" style="margin-top:6px">Eine formale Validierung mit dem KoSIT-Prüftool wird empfohlen. Leitweg-IDs werden je Kunde gepflegt.</div>
+        </div>
+
+        <div class="card form-card">
+          <h2>Kalkulation</h2>
+          <div class="fc-sub">Vorgabewerte für Angebots- und Nachkalkulation.</div>
+          <div class="form-grid">
+            ${input('default_calc_wage_rate', 'Kalkulatorischer Lohn (€/Std.)', { type: 'number', step: '0.01' })}
+            ${input('default_calc_overhead_pct', 'Gemeinkosten (%)', { type: 'number', step: '0.1' })}
+            ${input('default_calc_profit_pct', 'Gewinnaufschlag (%)', { type: 'number', step: '0.1' })}
+            ${input('default_calc_discount_pct', 'Rabatt (%)', { type: 'number', step: '0.1' })}
+          </div>
+        </div>
+
+        <div class="card form-card">
+          <h2>Personal</h2>
+          <div class="fc-sub">Standardwerte für neue Mitarbeiter und Arbeitszeitkonten.</div>
+          <div class="form-grid">
+            ${input('hr_weekly_hours', 'Wochenstunden', { type: 'number', step: '0.5' })}
+            ${input('hr_vacation_days', 'Urlaubsanspruch (Tage)', { type: 'number', step: '0.5' })}
+          </div>
+          <div class="hr"></div>
+          <div class="section-head compact"><div><h3>Checklistenvorlagen</h3><div class="small muted">${checklistData.length} Vorlagen</div></div>
+            <button class="btn sm" type="button" data-action="new-checklist-template">${icon('plus')} Vorlage</button></div>
+          <div class="list-stack">
+            ${checklistData.map((template) => `<div class="list-row static">
+              <span class="list-ico">${icon('check')}</span>
+              <span class="list-main"><b>${esc(template.name)}</b><small>${esc(template.trade || 'Allgemein')} · ${template.items.length} Punkte</small></span>
+              <button class="icon-btn" type="button" data-action="edit-checklist-template" data-id="${template.id}" title="Bearbeiten">${icon('edit')}</button>
+            </div>`).join('') || '<div class="small muted">Noch keine Vorlagen.</div>'}
+          </div>
+        </div>
+
+        <div class="card form-card">
+          <h2>Finanzen & DATEV</h2>
+          <div class="fc-sub">Kontenrahmen für den DATEV-Buchungsstapel und Gläubiger-ID für SEPA.</div>
+          <div class="form-grid">
+            ${input('datev_consultant', 'DATEV Beraternummer')}
+            ${input('datev_client', 'DATEV Mandantennummer')}
+            ${input('datev_account_revenue', 'Erlöskonto')}
+            ${input('datev_account_receivable', 'Debitorenkonto')}
+            ${input('datev_account_bank', 'Bankkonto')}
+            ${input('sepa_creditor_id', 'SEPA-Gläubiger-ID', { hint: 'Nur für Lastschriften nötig – Überweisungen funktionieren ohne.' })}
+          </div>
+          <div class="small muted" style="margin-top:6px">Die Kontenzuordnung bitte mit dem Steuerberater abstimmen. Export unter „Finanzen“.</div>
+        </div>
+
+        <div class="card form-card">
+          <h2>Webhooks & Schnittstellen</h2>
+          <div class="fc-sub">Ereignisse als signiertes JSON an andere Systeme senden (HTTPS).</div>
+          <div class="list-stack">
+            ${(webhookData.webhooks || []).map((hook) => `<div class="list-row static">
+              <span class="list-ico">${icon('send')}</span>
+              <span class="list-main"><b>${esc(hook.url)}</b><small>${esc((hook.events || []).join(', ') || '*')} · ${hook.active ? 'aktiv' : 'inaktiv'}${hook.last_status ? ` · letzter Status ${hook.last_status}` : ''}</small></span>
+              <span class="lr-actions">
+                <button class="btn sm" type="button" data-action="test-webhook" data-id="${hook.id}">Test</button>
+                <button class="icon-btn" type="button" data-action="delete-webhook" data-id="${hook.id}" title="Löschen">${icon('trash')}</button>
+              </span>
+            </div>`).join('') || '<div class="small muted">Noch keine Webhooks eingerichtet.</div>'}
+          </div>
+          <div style="margin-top:10px"><button class="btn sm" type="button" data-action="new-webhook">${icon('plus')} Webhook anlegen</button></div>
+          <div class="hr"></div>
+          <div class="small muted">Öffentliche API-Dokumentation: <a href="/api/openapi.json" target="_blank" rel="noopener">/api/openapi.json</a> (OpenAPI 3.0, Anmeldung erforderlich).</div>
+        </div>
+
         ${materialSettingsCard(settings, materialData.sources)}
       </div>
 
@@ -4119,7 +4387,7 @@ const ACTIONS = {
     }
   },
   'new-order': () => orderForm(),
-  'new-appointment': () => appointmentForm(),
+  'new-appointment': (id, el) => appointmentForm(null, el?.dataset?.date ? { date: el.dataset.date } : {}),
   'new-customer': () => customerForm(),
   'new-contract': () => contractForm(),
   'new-article': () => articleForm(),
@@ -4387,7 +4655,7 @@ const ACTIONS = {
     }
   },
   'calendar-mode': (id, el) => {
-    state.calendarMode = el.dataset.mode === 'month' ? 'month' : 'week';
+    state.calendarMode = ['month', 'board'].includes(el.dataset.mode) ? el.dataset.mode : 'week';
     if (state.calendarMode === 'month') {
       state.monthStart = startOfMonth(state.weekStart || new Date());
     }
@@ -4543,6 +4811,341 @@ const ACTIONS = {
     }
   },
   'change-password': () => openPasswordChange(),
+
+  /* ---------------------------------------------------------------- DMS */
+  'filter-documents': (id, el) => { state.documentsFilter = el.dataset.filter; renderDocuments(); },
+  'upload-document': () => uploadDocumentModal(),
+  'upload-order-document': (id) => uploadDocumentModal({ order_id: id, category: 'auftrag' }),
+  'open-document': (id) => openDocumentModal(id),
+  'document-versions': (id) => newDocumentVersionModal(id),
+  'delete-document': async (id) => {
+    if (!confirm('Dokument aus der aktiven Ablage entfernen? Die Datei bleibt revisionssicher archiviert.')) return;
+    try {
+      await api.del(`/api/documents/${id}`);
+      closeModal();
+      toast('Dokument entfernt.');
+      await renderDocuments();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Finanzen */
+  'finance-tab': (id, el) => { state.financeTab = el.dataset.tab; renderFinance(); },
+  'import-bank': () => bankImportModal(),
+  'run-bank-import': async () => {
+    try {
+      const result = await api.post('/api/finance/bank/auto-match');
+      toast(`${result.matched} Zahlungen automatisch zugeordnet.`);
+      await renderFinance();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'match-transaction': (id) => matchTransactionModal(id),
+  'run-sepa': () => sepaModal(),
+  'sepa-file': () => { window.location.href = '/api/finance/sepa/file'; },
+  'datev-export': () => {
+    const from = $('#datev-from')?.value || '';
+    const to = $('#datev-to')?.value || '';
+    window.location.href = `/api/finance/datev?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+  },
+
+  /* ---------------------------------------------------------------- Plantafel */
+  'new-resource': () => resourceFormModal(),
+  'resource-list': () => resourceListModal(),
+  'new-booking': (id, el) => newBookingModal(el.dataset),
+  'edit-booking': (id) => editBookingModal(id),
+  'edit-resource': async (id) => {
+    try {
+      const resources = await api.get('/api/resources');
+      resourceFormModal(resources.find((row) => row.id === Number(id)) || null);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'delete-resource': async (id) => {
+    if (!confirm('Ressource löschen? Bereits geplante Buchungen bleiben erhalten.')) return;
+    try {
+      const result = await api.del(`/api/resources/${id}`);
+      toast(result.deactivated ? 'Ressource deaktiviert (noch eingeplant).' : 'Ressource gelöscht.');
+      if ($('#modal-root')?.innerHTML) await resourceListModal();
+      else await renderPlanning();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Personal */
+  'request-absence': (id) => requestAbsenceModal(id),
+  'decide-absence': async (id, el) => {
+    try {
+      await api.post(`/api/absences/${id}/decide`, { status: el.dataset.status });
+      toast(el.dataset.status === 'genehmigt' ? 'Antrag genehmigt.' : 'Antrag abgelehnt.');
+      await renderTeam();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'hr-account': (id) => hrAccountModal(id),
+  'time-adjustment': (id) => timeAdjustmentModal(id),
+  'vacation-entitlement': (id) => vacationEntitlementModal(id),
+
+  /* ---------------------------------------------------------------- Kalkulation */
+  'order-calculation': (id) => orderCalculationModal(id),
+  'save-calculation': async (id) => {
+    try {
+      const payload = calculationPayload(id);
+      if (!payload) return;
+      await api.put(`/api/orders/${id}/calculation`, payload);
+      toast('Kalkulation gespeichert.');
+      await orderCalculationModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'apply-calculation': async (id) => {
+    if (!confirm('Kalkulierte Verkaufspreise in die Auftragspositionen schreiben?')) return;
+    try {
+      const payload = calculationPayload(id);
+      if (!payload) return;
+      const result = await api.post(`/api/orders/${id}/calculation/apply`, payload);
+      toast(`Preise übernommen – Marge ${num2(result.planned.margin_pct)} %.`);
+      closeModal();
+      await openOrder(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Aufmaß */
+  'order-measurements': (id) => orderMeasurementsModal(id),
+  'save-measurement': async (id) => {
+    const form = $('#measurement-form');
+    if (!form) return;
+    const data = {};
+    [...form.elements].forEach((input) => {
+      if (!input.name) return;
+      data[input.name] = input.type === 'number' ? Number(input.value || 0) : input.value;
+    });
+    try {
+      await api.post(`/api/orders/${id}/measurements`, data);
+      toast('Aufmaßposition gespeichert.');
+      await orderMeasurementsModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'delete-measurement': async (id, el) => {
+    try {
+      await api.del(`/api/orders/${id}/measurements/${el.dataset.measurement}`);
+      toast('Position gelöscht.');
+      await orderMeasurementsModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'apply-measurements': async (id) => {
+    if (!confirm('Alle Aufmaßpositionen als Auftragspositionen übernehmen?')) return;
+    try {
+      const result = await api.post(`/api/orders/${id}/measurements/apply`, {});
+      toast(`${result.positions} Positionen übernommen.`);
+      closeModal();
+      await openOrder(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Checklisten */
+  'order-checklists': (id) => orderChecklistsModal(id),
+  'add-checklist': async (id) => {
+    const templateId = $('#checklist-template')?.value;
+    if (!templateId) return;
+    try {
+      await api.post(`/api/orders/${id}/checklists`, { template_id: Number(templateId) });
+      toast('Checkliste angelegt.');
+      await orderChecklistsModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'toggle-checklist-entry': async (id, el) => {
+    try {
+      await api.put(`/api/checklists/${el.dataset.checklist}/entries/${el.dataset.entry}`, { checked: el.checked ? 1 : 0 });
+    } catch (error) {
+      toast(error.message, 'error');
+      el.checked = !el.checked;
+    }
+  },
+  'delete-checklist': async (id, el) => {
+    if (!confirm('Checkliste mit allen Punkten löschen?')) return;
+    try {
+      await api.del(`/api/checklists/${id}`);
+      toast('Checkliste gelöscht.');
+      await orderChecklistsModal(Number(el.dataset.order));
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Bautagebuch */
+  'order-diary': (id) => orderDiaryModal(id),
+  'save-diary': async (id) => {
+    const form = $('#diary-form');
+    if (!form) return;
+    const data = {};
+    [...form.elements].forEach((input) => { if (input.name) data[input.name] = input.value; });
+    try {
+      await api.post(`/api/orders/${id}/diary`, data);
+      toast('Eintrag gespeichert.');
+      await orderDiaryModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'delete-diary': async (id, el) => {
+    try {
+      await api.del(`/api/orders/${id}/diary/${el.dataset.entry}`);
+      toast('Eintrag gelöscht.');
+      await orderDiaryModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Unterschrift */
+  'order-signature': (id) => orderSignatureModal(id),
+  'clear-signature': () => signaturePadState?.clear(),
+  'save-signature': async (id) => {
+    const form = $('#signature-form');
+    if (!form || !signaturePadState) return;
+    const customerName = form.elements.customer_name.value.trim();
+    if (!customerName) return toast('Bitte den Namen des Unterzeichners angeben.', 'error');
+    if (!signaturePadState.hasInk()) return toast('Bitte zuerst unterschreiben.', 'error');
+    try {
+      await api.post(`/api/orders/${id}/signatures`, {
+        customer_name: customerName,
+        note: form.elements.note.value.trim(),
+        dataUrl: signaturePadState.canvas.toDataURL('image/png'),
+      });
+      toast('Unterschrift gespeichert.');
+      closeModal();
+      await openOrder(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Projektakte & GAEB */
+  'order-documents': async (id) => {
+    try {
+      const data = await api.get(`/api/orders/${id}`);
+      await orderDocumentsModal(id, data.order.number);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'order-gaeb': (id) => orderGaebModal(id),
+  'download-gaeb': (id) => { window.location.href = `/api/orders/${id}/gaeb`; },
+  assistant: (id, el) => assistantModal({
+    kind: el.dataset.kind || 'angebot',
+    orderId: el.dataset.invoice ? null : id,
+    invoiceId: el.dataset.invoice ? Number(el.dataset.invoice) : null,
+    customerId: el.dataset.customer ? Number(el.dataset.customer) : null,
+  }),
+  'run-assistant': () => runAssistant(),
+  'copy-assistant': async () => {
+    const field = $('#assistant-result');
+    if (!field?.value) return toast('Noch kein Entwurf vorhanden.', 'error');
+    try {
+      await navigator.clipboard.writeText(field.value);
+      toast('Entwurf kopiert.');
+    } catch {
+      field.select();
+      document.execCommand('copy');
+      toast('Entwurf kopiert.');
+    }
+  },
+
+  /* ---------------------------------------------------------------- Inventur & Scan */
+  'open-inventory': (id) => inventorySessionModal(id),
+  'new-inventory': () => newInventoryModal(),
+  'save-inventory-count': async (id) => {
+    const form = $('#count-form');
+    if (!form) return;
+    try {
+      await api.post(`/api/inventory/${id}/count`, {
+        article_id: Number(form.elements.article_id.value),
+        counted: Number(form.elements.counted.value),
+        note: form.elements.note.value,
+      });
+      toast('Zählung gespeichert.');
+      await inventorySessionModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'close-inventory': async (id) => {
+    if (!confirm('Inventur abschließen? Abweichungen werden in den Bestand gebucht.')) return;
+    try {
+      await api.post(`/api/inventory/${id}/close`);
+      toast('Inventur abgeschlossen.');
+      closeModal();
+      await renderWarehouse();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'scan-article': () => scanArticleModal(),
+
+  /* ---------------------------------------------------------------- Vorlagen & Webhooks */
+  'new-checklist-template': () => checklistTemplateModal(),
+  'edit-checklist-template': async (id) => {
+    try {
+      const templates = await api.get('/api/checklist-templates');
+      checklistTemplateModal(templates.find((row) => row.id === Number(id)) || null);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'new-webhook': () => webhookModal(),
+  'test-webhook': async (id) => {
+    try {
+      const delivery = await api.post(`/api/webhooks/${id}/test`);
+      toast(delivery?.error ? `Test fehlgeschlagen: ${delivery.error}` : `Test zugestellt (HTTP ${delivery?.status ?? '?'}).`,
+        delivery?.error ? 'error' : 'success');
+      await renderSettings();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'delete-webhook': async (id) => {
+    if (!confirm('Webhook löschen?')) return;
+    try {
+      await api.del(`/api/webhooks/${id}`);
+      toast('Webhook gelöscht.');
+      await renderSettings();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* ---------------------------------------------------------------- E-Rechnung */
+  'invoice-einvoice': (id, el) => {
+    const format = el.dataset.format === 'zugferd' ? 'zugferd' : 'xrechnung';
+    const pdf = format === 'zugferd' ? '&pdf=1' : '';
+    window.open(`/api/invoices/${id}/einvoice?format=${format}${pdf}`, '_blank', 'noopener');
+  },
+  'edit-einvoice': async (id) => {
+    try {
+      const data = await api.get(`/api/invoices/${id}`);
+      einvoiceReferenceModal(id, data.invoice.buyer_reference || data.customer?.leitweg_id || '');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
   logout: async () => {
     try { await api.post('/api/auth/logout'); } catch { /* stumm */ }
     state.user = null;
@@ -4554,6 +5157,8 @@ const ACTIONS = {
 document.addEventListener('click', (event) => {
   const element = event.target.closest('[data-action]');
   if (!element) return;
+  // Checkboxen und Dateifelder reagieren auf change, nicht auf click.
+  if (element.tagName === 'INPUT') return;
   if (element.tagName === 'A' && element.getAttribute('href')?.startsWith('#')) return;
   const action = ACTIONS[element.dataset.action];
   if (!action) return;
@@ -4561,6 +5166,15 @@ document.addEventListener('click', (event) => {
   event.stopPropagation();
   const id = element.dataset.id ? Number(element.dataset.id) : null;
   action(id, element, event);
+});
+
+document.addEventListener('change', (event) => {
+  const element = event.target.closest('input[data-action]');
+  if (!element) return;
+  const action = ACTIONS[element.dataset.action];
+  if (!action) return;
+  event.stopPropagation();
+  action(element.dataset.id ? Number(element.dataset.id) : null, element, event);
 });
 
 $('#primary-action').addEventListener('click', () => {
@@ -4574,7 +5188,7 @@ $('#global-search')?.addEventListener('input', (event) => {
   state.search = event.target.value.trim();
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    if (['orders', 'invoices', 'customers', 'warehouse', 'contracts', 'planning'].includes(state.page)) {
+    if (['orders', 'invoices', 'customers', 'warehouse', 'contracts', 'planning', 'documents'].includes(state.page)) {
       PAGES[state.page].render();
     }
   }, 220);
@@ -4588,6 +5202,1220 @@ document.addEventListener('keydown', (event) => {
 });
 
 window.addEventListener('hashchange', navigate);
+
+/* ============================================================================
+ * HERO-Parität im Frontend: DMS, Finanzen, Plantafel, Personal, Kalkulation,
+ * Aufmaß, Checklisten, Bautagebuch, Unterschrift, Inventur und Schnittstellen.
+ * ========================================================================== */
+
+const DOCUMENT_CATEGORIES_UI = {
+  rechnung: 'Rechnung', angebot: 'Angebot', auftrag: 'Auftrag', aufmass: 'Aufmaß',
+  foto: 'Foto', protokoll: 'Protokoll', vertrag: 'Vertrag', lieferschein: 'Lieferschein',
+  eingangsrechnung: 'Eingangsrechnung', steuer: 'Steuer / Buchhaltung', sonstiges: 'Sonstiges',
+};
+
+const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result));
+  reader.onerror = () => reject(new Error('Datei konnte nicht gelesen werden'));
+  reader.readAsDataURL(file);
+});
+
+const readTextFile = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result));
+  reader.onerror = () => reject(new Error('Datei konnte nicht gelesen werden'));
+  reader.readAsText(file, 'utf-8');
+});
+
+const documentSize = (bytes) => {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+};
+
+const categoryOptions = (selected = 'sonstiges') => Object.entries(DOCUMENT_CATEGORIES_UI)
+  .map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${esc(label)}</option>`)
+  .join('');
+
+/* ------------------------------------------------------------------ DMS */
+
+async function renderDocuments() {
+  const documents = await api.get('/api/documents');
+  const filter = state.documentsFilter || 'alle';
+  const term = state.search.toLowerCase();
+  const visible = documents.filter((doc) => {
+    if (filter !== 'alle' && doc.category !== filter) return false;
+    if (!term) return true;
+    return `${doc.title} ${doc.original_name || ''} ${doc.note || ''} ${doc.company || ''} ${doc.last_name || ''} ${doc.order_number || ''} ${doc.invoice_number || ''}`
+      .toLowerCase().includes(term);
+  });
+  const used = Object.keys(DOCUMENT_CATEGORIES_UI).filter((key) => documents.some((doc) => doc.category === key));
+
+  view.innerHTML = `
+    <div class="toolbar">
+      <div class="chips">
+        <button class="chip ${filter === 'alle' ? 'active' : ''}" data-action="filter-documents" data-filter="alle">Alle <b>${documents.length}</b></button>
+        ${used.map((key) => `<button class="chip ${filter === key ? 'active' : ''}" data-action="filter-documents" data-filter="${key}">${esc(DOCUMENT_CATEGORIES_UI[key])}</button>`).join('')}
+      </div>
+    </div>
+    ${visible.length ? `
+      <div class="card">
+        <div class="card-head"><div><h2>Ablage</h2><div class="sub">Revisionssichere Ablage – Versionen und Änderungen werden protokolliert</div></div></div>
+        <div class="list-stack padded">
+          ${visible.map((doc) => `
+            <div class="list-row static">
+              <span class="list-ico">${icon('file')}</span>
+              <span class="list-main">
+                <b>${esc(doc.title)}</b>
+                <small>${esc(DOCUMENT_CATEGORIES_UI[doc.category] || doc.category)} · ${documentSize(doc.size)} · ${fmtDate(doc.created_at)}${doc.version > 1 ? ` · Version ${doc.version}` : ''}</small>
+                <small class="muted">${doc.order_number ? `Auftrag ${esc(doc.order_number)}` : ''}${doc.invoice_number ? ` · Rechnung ${esc(doc.invoice_number)}` : ''}${doc.company || doc.last_name ? ` · ${esc(doc.company || customerName(doc))}` : ''}</small>
+              </span>
+              <span class="lr-actions">
+                <button class="btn sm" type="button" data-action="open-document" data-id="${doc.id}">Details</button>
+                <a class="icon-btn" href="/api/documents/${doc.id}/file" target="_blank" rel="noopener" title="Herunterladen">${icon('download')}</a>
+              </span>
+            </div>`).join('')}
+        </div>
+      </div>`
+    : `<div class="empty-state"><div class="empty-ico">${icon('file')}</div><h3>Noch keine Dokumente</h3><p>Rechnungen werden automatisch archiviert. Weitere Belege können jederzeit abgelegt werden.</p></div>`}`;
+}
+
+function uploadDocumentModal(relation = {}) {
+  openModal({
+    title: 'Dokument ablegen',
+    subtitle: 'PDF, Bild, Office-Datei oder XML – maximal 25 MB',
+    body: `
+      <form id="document-form" class="form-grid">
+        ${relation.order_id ? `<input type="hidden" name="order_id" value="${relation.order_id}" />` : ''}
+        ${relation.customer_id ? `<input type="hidden" name="customer_id" value="${relation.customer_id}" />` : ''}
+        ${relation.invoice_id ? `<input type="hidden" name="invoice_id" value="${relation.invoice_id}" />` : ''}
+        <div class="field full"><label>Datei *</label><input type="file" name="file" required
+          accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.xml,.csv,.txt,.eml,.docx,.xlsx,.odt,.ods,.zip" /></div>
+        <div class="field"><label>Bezeichnung</label><input name="title" placeholder="z. B. Wartungsprotokoll" /></div>
+        <div class="field"><label>Kategorie</label><select name="category">${categoryOptions(relation.category || 'sonstiges')}</select></div>
+        <div class="field full"><label>Notiz</label><textarea name="note" rows="2" placeholder="Optionaler Hinweis zur Ablage"></textarea></div>
+      </form>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Abbrechen</button>
+      <button class="btn primary" type="submit" form="document-form">Ablegen</button>`,
+  });
+  $('#document-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const file = form.elements.file.files[0];
+    if (!file) return toast('Bitte eine Datei auswählen', 'error');
+    const button = $('button[type="submit"][form="document-form"]');
+    button.disabled = true;
+    button.textContent = 'Lädt hoch…';
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      await api.post('/api/documents', {
+        dataUrl,
+        filename: file.name,
+        title: form.elements.title.value.trim() || file.name,
+        category: form.elements.category.value,
+        note: form.elements.note.value.trim(),
+        order_id: relation.order_id || null,
+        customer_id: relation.customer_id || null,
+        invoice_id: relation.invoice_id || null,
+      });
+      closeModal();
+      toast('Dokument archiviert.');
+      if (relation.order_id) await openOrder(Number(relation.order_id));
+      else await renderDocuments();
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+      button.textContent = 'Ablegen';
+    }
+  });
+}
+
+async function openDocumentModal(id) {
+  const data = await api.get(`/api/documents/${id}`);
+  const { document: doc, versions = [], events = [] } = data;
+  openModal({
+    title: doc.title,
+    subtitle: `${DOCUMENT_CATEGORIES_UI[doc.category] || doc.category} · ${documentSize(doc.size)} · ${fmtDateTime(doc.created_at)}`,
+    size: 'wide',
+    body: `
+      <div class="meta-grid">
+        <div class="meta-item"><div class="k">Datei</div><div class="v">${esc(doc.original_name || doc.filename)}<small>${esc(doc.mime || '')}</small></div></div>
+        <div class="meta-item"><div class="k">Version</div><div class="v">${doc.version}</div></div>
+        <div class="meta-item"><div class="k">Prüfsumme</div><div class="v small mono">${esc(String(doc.sha256 || '').slice(0, 16))}…</div></div>
+        <div class="meta-item"><div class="k">Ablage</div><div class="v">${fmtDate(doc.created_at)}<small>${esc(doc.user_name || '')}</small></div></div>
+      </div>
+      ${doc.note ? `<p class="small muted">${esc(doc.note)}</p>` : ''}
+      <div class="section-head compact"><div><h4>Versionen</h4></div>
+        ${can('documents.manage') && !doc.deleted_at ? `<button class="btn sm" type="button" data-action="document-versions" data-id="${doc.id}">${icon('plus')} Neue Version</button>` : ''}</div>
+      <div class="list-stack">
+        ${versions.map((row) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon('file')}</span>
+            <span class="list-main"><b>Version ${row.version}</b><small>${fmtDateTime(row.created_at)} · ${documentSize(row.size)} · ${esc(row.user_name || '')}</small></span>
+            <a class="icon-btn" href="/api/documents/${row.id}/file" target="_blank" rel="noopener" title="Herunterladen">${icon('download')}</a>
+          </div>`).join('')}
+      </div>
+      <div class="hr"></div>
+      <div class="section-head compact"><div><h4>Verlauf</h4><div class="small muted">GoBD-Protokoll</div></div></div>
+      <div class="list-stack">
+        ${events.map((row) => `<div class="list-row static">
+          <span class="list-ico">${icon('clock')}</span>
+          <span class="list-main"><b>${esc(row.action)}</b><small>${fmtDateTime(row.created_at)} · ${esc(row.user_name || 'System')}${row.detail ? ` · ${esc(row.detail)}` : ''}</small></span>
+        </div>`).join('')}
+      </div>`,
+    footer: `
+      ${can('documents.manage') && !doc.deleted_at ? `<button class="btn sm danger" type="button" data-action="delete-document" data-id="${doc.id}">Löschen</button>` : ''}
+      <div class="spacer"></div>
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+}
+
+function newDocumentVersionModal(id) {
+  openModal({
+    title: 'Neue Version ablegen',
+    subtitle: 'Die bisherigen Versionen bleiben unverändert erhalten.',
+    body: `
+      <form id="version-form" class="form-grid">
+        <div class="field full"><label>Datei *</label><input type="file" name="file" required /></div>
+        <div class="field full"><label>Notiz</label><input name="note" placeholder="Was hat sich geändert?" /></div>
+      </form>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Abbrechen</button>
+      <button class="btn primary" type="submit" form="version-form">Hochladen</button>`,
+  });
+  $('#version-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const file = form.elements.file.files[0];
+    if (!file) return toast('Bitte eine Datei auswählen', 'error');
+    try {
+      await api.post(`/api/documents/${id}/versions`, {
+        dataUrl: await fileToDataUrl(file),
+        filename: file.name,
+        note: form.elements.note.value.trim(),
+      });
+      closeModal();
+      toast('Neue Version archiviert.');
+      await openDocumentModal(id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ Finanzen */
+
+const FINANCE_TABS = {
+  bank: 'Bankabgleich',
+  sepa: 'SEPA-Überweisungen',
+  datev: 'DATEV-Export',
+};
+
+async function renderFinance() {
+  const tab = state.financeTab || 'bank';
+  const [overview, bank] = await Promise.all([
+    api.get('/api/finance/overview'),
+    api.get('/api/finance/bank').catch(() => []),
+  ]);
+  const year = new Date().getFullYear();
+  const from = `${year}-01-01`;
+  const to = todayISO();
+
+  view.innerHTML = `
+    <div class="kpi-grid tight">
+      <div class="kpi"><div class="ico">${icon('receipt')}</div><div class="label">Offene Rechnungen</div><div class="value">${money(overview.open_invoices.amount)}</div><div class="foot">${overview.open_invoices.count} Rechnungen</div></div>
+      <div class="kpi"><div class="ico">${icon('euro')}</div><div class="label">Unzugeordnete Eingänge</div><div class="value">${money(overview.bank.unmatched_amount)}</div><div class="foot">${overview.bank.unmatched} Buchungen</div></div>
+      <div class="kpi"><div class="ico">${icon('check')}</div><div class="label">Verbucht</div><div class="value">${overview.bank.booked}</div><div class="foot">über Bankabgleich</div></div>
+    </div>
+
+    <div class="view-switch" style="margin:14px 0">
+      ${Object.entries(FINANCE_TABS).map(([key, label]) => `<button class="chip ${tab === key ? 'active' : ''}" data-action="finance-tab" data-tab="${key}">${esc(label)}</button>`).join('')}
+    </div>
+
+    ${tab === 'bank' ? `
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Bankumsätze</h2><div class="sub">CSV oder CAMT.053 importieren, Zahlungen zuordnen und verbuchen</div></div>
+          ${can('finance.manage') ? `
+            <div class="nowrap">
+              <button class="btn sm" type="button" data-action="import-bank">${icon('download')} Importieren</button>
+              <button class="btn sm ghost" type="button" data-action="run-bank-import">${icon('refresh')} Abgleich</button>
+            </div>` : ''}
+        </div>
+        <div class="list-stack padded">
+          ${bank.length ? bank.map((row) => `
+            <div class="list-row static">
+              <span class="list-ico">${icon(row.amount >= 0 ? 'download' : 'send')}</span>
+              <span class="list-main">
+                <b>${esc(row.counterparty || row.purpose || 'Bankbuchung')}</b>
+                <small>${fmtDate(row.date)} · ${esc(row.purpose || '')}</small>
+                <small class="muted">${row.invoice_number ? `Rechnung ${esc(row.invoice_number)}` : 'Nicht zugeordnet'}${row.reference ? ` · ${esc(row.reference)}` : ''}</small>
+              </span>
+              <span class="nowrap" style="text-align:right">
+                <b class="num" style="color:${row.amount >= 0 ? 'var(--ok)' : 'var(--danger)'}">${money(row.amount)}</b>
+                <div><span class="badge ${row.status === 'verbucht' ? 'bezahlt' : row.status === 'zugeordnet' ? 'offen' : 'neutral'}">${esc(row.status)}</span></div>
+              </span>
+              <span class="lr-actions">
+                ${can('finance.manage') && row.status !== 'verbucht' && row.amount > 0 ? `<button class="btn sm" type="button" data-action="match-transaction" data-id="${row.id}">Zuordnen</button>` : ''}
+              </span>
+            </div>`).join('')
+          : '<div class="small muted">Noch keine Bankumsätze importiert.</div>'}
+        </div>
+      </div>` : ''}
+
+    ${tab === 'sepa' ? `
+      <div class="card">
+        <div class="card-head"><div><h2>SEPA-Überweisungen</h2><div class="sub">Offene Rechnungen mit gültiger IBAN als pain.001 exportieren</div></div>
+          <button class="btn sm" type="button" data-action="run-sepa">${icon('download')} XML erzeugen</button></div>
+        <div class="card-body">
+          <div class="small muted">Bankverbindungen werden beim Kunden gepflegt. Die eigene IBAN steht unter Einstellungen → Firma.</div>
+        </div>
+      </div>` : ''}
+
+    ${tab === 'datev' ? `
+      <div class="card">
+        <div class="card-head"><div><h2>DATEV-Buchungsstapel</h2><div class="sub">EXTF-Format 700 für den Steuerberater</div></div>
+          <button class="btn sm" type="button" data-action="datev-export">${icon('download')} Exportieren</button></div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="field"><label>Von</label><input type="date" id="datev-from" value="${from}" /></div>
+            <div class="field"><label>Bis</label><input type="date" id="datev-to" value="${to}" /></div>
+          </div>
+          <div class="small muted" style="margin-top:8px">Kontenrahmen unter Einstellungen → Finanzen & DATEV. Die Zuordnung bitte mit dem Steuerberater abstimmen.</div>
+        </div>
+      </div>` : ''}`;
+}
+
+function bankImportModal() {
+  openModal({
+    title: 'Bankumsätze importieren',
+    subtitle: 'CSV-Export der Bank oder CAMT.053-XML',
+    body: `
+      <form id="bank-form" class="form-grid">
+        <div class="field full"><label>Datei *</label><input type="file" name="file" required accept=".csv,.xml,.txt" /></div>
+        <div class="small muted full">Erwartet Spalten wie Buchungstag, Betrag, Verwendungszweck, Auftraggeber und IBAN. Duplikate werden automatisch übersprungen.</div>
+      </form>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Abbrechen</button>
+      <button class="btn primary" type="submit" form="bank-form">Importieren</button>`,
+  });
+  $('#bank-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const file = event.target.elements.file.files[0];
+    if (!file) return toast('Bitte eine Datei auswählen', 'error');
+    const button = $('button[form="bank-form"]');
+    button.disabled = true;
+    button.textContent = 'Importiert…';
+    try {
+      const content = await readTextFile(file);
+      const result = await api.post('/api/finance/bank/import', { content, filename: file.name });
+      closeModal();
+      toast(`${result.imported} Buchungen importiert, ${result.skipped} Duplikate übersprungen.`);
+      await renderFinance();
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+      button.textContent = 'Importieren';
+    }
+  });
+}
+
+async function matchTransactionModal(transactionId) {
+  const [tx, invoices] = await Promise.all([
+    api.get('/api/finance/bank').then((rows) => rows.find((row) => row.id === Number(transactionId))),
+    api.get('/api/invoices?status=offen'),
+  ]);
+  if (!tx) return toast('Buchung nicht gefunden', 'error');
+  formModal({
+    title: 'Zahlung zuordnen',
+    subtitle: `${fmtDate(tx.date)} · ${money(tx.amount)} · ${tx.counterparty || tx.purpose || ''}`,
+    fields: [
+      { name: 'invoice_id', label: 'Rechnung', type: 'select', required: true,
+        placeholder: 'Rechnung wählen',
+        options: invoices.map((invoice) => ({
+          value: invoice.id,
+          label: `${invoice.number} · ${invoice.company || `${invoice.first_name} ${invoice.last_name}`.trim()} · offen ${money(Number(invoice.total) - Number(invoice.paid_total))}`,
+        })),
+        default: tx.invoice_id || '' },
+      { name: 'note', label: 'Notiz', default: 'Bankabgleich' },
+    ],
+    submitLabel: 'Zahlung verbuchen',
+    onSubmit: async (data) => {
+      await api.post(`/api/finance/bank/${transactionId}/book`, data);
+      closeModal();
+      toast('Zahlung verbucht.');
+      await renderFinance();
+    },
+  });
+}
+
+async function sepaModal() {
+  const preview = await api.get('/api/finance/sepa');
+  const rows = preview.rows || [];
+  openModal({
+    title: 'SEPA-Überweisung',
+    subtitle: `${preview.payable.length} Rechnungen mit gültiger IBAN · ${money(preview.payable.reduce((sum, row) => sum + row.open_amount, 0))}`,
+    size: 'wide',
+    body: `
+      <div class="small muted">Auftraggeber-IBAN: <b>${esc(preview.debtor_iban || 'nicht hinterlegt')}</b></div>
+      <div class="list-stack" style="margin-top:10px">
+        ${rows.length ? rows.map((row) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon(row.iban_valid ? 'check' : 'alert')}</span>
+            <span class="list-main"><b>${esc(row.number)} · ${esc(row.name)}</b>
+              <small>${esc(row.iban || 'keine IBAN')}${row.iban_valid ? '' : ' · IBAN ungültig'}</small></span>
+            <span class="num">${money(row.open_amount)}</span>
+          </div>`).join('') : '<div class="small muted">Keine offenen Rechnungen.</div>'}
+      </div>
+      ${preview.invalid.length ? `<div class="notice warn" style="margin-top:12px">${preview.invalid.length} Rechnungen werden wegen fehlender oder ungültiger IBAN nicht übernommen.</div>` : ''}`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      <button class="btn primary" type="button" data-action="sepa-file" ${preview.payable.length ? '' : 'disabled'}>${icon('download')} XML herunterladen</button>`,
+  });
+}
+
+/* ------------------------------------------------------------------ Plantafel & Ressourcen */
+
+const toLocalInput = (date) => {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const bookingWindow = (dataset = {}) => {
+  if (dataset.start) return { start: dataset.start, end: dataset.end };
+  const day = dataset.date || todayISO();
+  return { start: `${day}T08:00`, end: `${day}T16:00` };
+};
+
+async function newBookingModal(dataset = {}) {
+  const [resources, orders] = await Promise.all([
+    api.get('/api/resources'),
+    canAny('orders.view.all', 'orders.view.own') ? api.get('/api/orders?status=offen').catch(() => []) : [],
+  ]);
+  const window = bookingWindow(dataset);
+  formModal({
+    title: 'Ressource einplanen',
+    subtitle: 'Überschneidungen werden serverseitig geprüft',
+    fields: [
+      { name: 'resource_id', label: 'Ressource', type: 'select', required: true,
+        options: resources.filter((row) => row.active).map((row) => ({ value: row.id, label: `${row.name} (${row.type_label})` })),
+        default: dataset.resource || '' },
+      { name: 'order_id', label: 'Auftrag', type: 'select', placeholder: 'Ohne Auftrag',
+        options: orders.map((order) => ({ value: order.id, label: `${order.number} · ${order.title}` })) },
+      { name: 'start_at', label: 'Beginn', type: 'datetime-local', required: true, default: window.start },
+      { name: 'end_at', label: 'Ende', type: 'datetime-local', required: true, default: window.end },
+      { name: 'note', label: 'Notiz', full: true },
+    ],
+    onSubmit: async (data) => {
+      await api.post('/api/resource-bookings', data);
+      closeModal();
+      toast('Ressource eingeplant.');
+      await renderPlanning();
+    },
+  });
+}
+
+async function editBookingModal(id) {
+  const [bookings, resources, orders] = await Promise.all([
+    api.get('/api/resource-bookings'),
+    api.get('/api/resources'),
+    canAny('orders.view.all', 'orders.view.own') ? api.get('/api/orders?status=offen').catch(() => []) : [],
+  ]);
+  const booking = bookings.find((row) => row.id === Number(id));
+  if (!booking) return toast('Buchung nicht gefunden', 'error');
+  formModal({
+    title: 'Buchung bearbeiten',
+    subtitle: booking.resource_name,
+    fields: [
+      { name: 'resource_id', label: 'Ressource', type: 'select', required: true,
+        options: resources.filter((row) => row.active).map((row) => ({ value: row.id, label: `${row.name} (${row.type_label})` })),
+        default: booking.resource_id },
+      { name: 'order_id', label: 'Auftrag', type: 'select', placeholder: 'Ohne Auftrag',
+        options: orders.map((order) => ({ value: order.id, label: `${order.number} · ${order.title}` })),
+        default: booking.order_id || '' },
+      { name: 'start_at', label: 'Beginn', type: 'datetime-local', required: true, default: booking.start_at.slice(0, 16) },
+      { name: 'end_at', label: 'Ende', type: 'datetime-local', required: true, default: booking.end_at.slice(0, 16) },
+      { name: 'note', label: 'Notiz', full: true, default: booking.note || '' },
+    ],
+    onSubmit: async (data) => {
+      await api.put(`/api/resource-bookings/${id}`, data);
+      closeModal();
+      toast('Buchung gespeichert.');
+      await renderPlanning();
+    },
+  });
+}
+
+function resourceFormModal(resource = null) {
+  formModal({
+    title: resource ? 'Ressource bearbeiten' : 'Neue Ressource',
+    subtitle: 'Fahrzeuge, Werkzeuge, Maschinen und Sonstiges',
+    fields: [
+      { name: 'name', label: 'Bezeichnung', required: true, default: resource?.name || '' },
+      { name: 'type', label: 'Art', type: 'select', default: resource?.type || 'fahrzeug',
+        options: [
+          { value: 'fahrzeug', label: 'Fahrzeug' }, { value: 'werkzeug', label: 'Werkzeug' },
+          { value: 'maschine', label: 'Maschine' }, { value: 'sonstiges', label: 'Sonstiges' },
+        ] },
+      { name: 'identifier', label: 'Kennzeichen / Nummer', default: resource?.identifier || '' },
+      { name: 'capacity', label: 'Parallele Einsätze', type: 'number', step: '1', min: 1, default: resource?.capacity ?? 1 },
+      { name: 'color', label: 'Farbe', type: 'color', default: resource?.color || '#0f766e' },
+      { name: 'notes', label: 'Notiz', type: 'textarea', full: true, rows: 2, default: resource?.notes || '' },
+    ],
+    onSubmit: async (data) => {
+      if (resource) await api.put(`/api/resources/${resource.id}`, data);
+      else await api.post('/api/resources', data);
+      closeModal();
+      toast('Ressource gespeichert.');
+      await renderPlanning();
+    },
+  });
+}
+
+async function resourceListModal() {
+  const resources = await api.get('/api/resources');
+  openModal({
+    title: 'Ressourcen verwalten',
+    subtitle: `${resources.length} Einträge`,
+    body: `
+      <div class="list-stack">
+        ${resources.length ? resources.map((row) => `
+          <div class="list-row static">
+            <span class="resource-dot" style="background:${esc(row.color || '#0f766e')}">${icon('box')}</span>
+            <span class="list-main"><b>${esc(row.name)}</b>
+              <small>${esc(row.type_label)}${row.identifier ? ` · ${esc(row.identifier)}` : ''} · ${row.booking_count} Buchungen${row.active ? '' : ' · inaktiv'}</small></span>
+            <span class="lr-actions">
+              ${canAny('planning.manage', 'resources.manage') ? `
+                <button class="icon-btn" type="button" data-action="edit-resource" data-id="${row.id}" title="Bearbeiten">${icon('edit')}</button>
+                <button class="icon-btn" type="button" data-action="delete-resource" data-id="${row.id}" title="Löschen">${icon('trash')}</button>` : ''}
+            </span>
+          </div>`).join('') : '<div class="small muted">Noch keine Ressourcen angelegt.</div>'}
+      </div>`,
+    footer: `
+      ${canAny('planning.manage', 'resources.manage') ? `<button class="btn" type="button" data-action="new-resource">${icon('plus')} Neue Ressource</button>` : ''}
+      <div class="spacer"></div>
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+}
+
+/* ------------------------------------------------------------------ Personal */
+
+async function requestAbsenceModal(employeeId = null) {
+  const employees = state.employees.length ? state.employees : await api.get('/api/employees').catch(() => []);
+  const own = state.user?.employee_id;
+  formModal({
+    title: 'Abwesenheit beantragen',
+    subtitle: can('hr.manage') ? 'Anträge werden direkt gespeichert und können genehmigt werden.' : 'Der Antrag geht zur Genehmigung an die Personalverwaltung.',
+    fields: [
+      ...(can('hr.manage') ? [{ name: 'employee_id', label: 'Mitarbeiter', type: 'select', required: true,
+        options: employees.filter((row) => row.active !== 0).map((row) => ({ value: row.id, label: row.name })),
+        default: employeeId || '' }] : []),
+      { name: 'type', label: 'Art', type: 'select', default: 'urlaub',
+        options: [
+          { value: 'urlaub', label: 'Urlaub' }, { value: 'krank', label: 'Krankheit' },
+          { value: 'schule', label: 'Schule / Ausbildung' }, { value: 'fortbildung', label: 'Fortbildung' },
+          { value: 'unbezahlt', label: 'Unbezahlt' }, { value: 'elternzeit', label: 'Elternzeit' },
+          { value: 'sonstiges', label: 'Sonstiges' },
+        ] },
+      { name: 'start_date', label: 'Von', type: 'date', required: true, default: todayISO() },
+      { name: 'end_date', label: 'Bis', type: 'date', required: true, default: todayISO() },
+      { name: 'note', label: 'Notiz', type: 'textarea', rows: 2, full: true },
+    ],
+    onSubmit: async (data) => {
+      const body = { ...data };
+      if (!can('hr.manage')) body.employee_id = own;
+      await api.post('/api/absences', body);
+      closeModal();
+      toast('Abwesenheit gespeichert.');
+      await renderTeam();
+    },
+  });
+  if (!can('hr.manage') && !own) toast('Dein Benutzerkonto ist keinem Mitarbeiter zugeordnet.', 'error');
+}
+
+async function hrAccountModal(employeeId) {
+  const year = new Date().getFullYear();
+  const data = await api.get(`/api/hr/accounts?employee_id=${employeeId}&year=${year}`);
+  const { vacation, overtime } = data;
+  openModal({
+    title: `${vacation.employee_name} – Konten ${year}`,
+    subtitle: 'Urlaub und Arbeitszeit inklusive Wochenvergleich',
+    size: 'wide',
+    body: `
+      <div class="kpi-grid tight">
+        <div class="kpi"><div class="label">Urlaubsanspruch</div><div class="value">${num2(vacation.entitled)}</div><div class="foot">Tage</div></div>
+        <div class="kpi"><div class="label">Genehmigt</div><div class="value">${num2(vacation.approved)}</div><div class="foot">Tage</div></div>
+        <div class="kpi"><div class="label">Resturlaub</div><div class="value">${num2(vacation.remaining)}</div><div class="foot">${num2(vacation.pending)} Tage beantragt</div></div>
+        <div class="kpi"><div class="label">Arbeitszeitkonto</div><div class="value">${overtime.balance_hours >= 0 ? '+' : ''}${num2(overtime.balance_hours)}</div><div class="foot">Stunden · ${num2(overtime.weekly_hours)} Std./Woche</div></div>
+      </div>
+      <div class="hr"></div>
+      <div class="section-head compact"><div><h4>Wochenvergleich</h4><div class="small muted">${fmtDate(overtime.from)} – ${fmtDate(overtime.to)}</div></div></div>
+      <div class="list-stack">
+        ${overtime.weeks.slice(-8).reverse().map((week) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon('clock')}</span>
+            <span class="list-main"><b>Woche ab ${fmtDate(week.week_start)}</b>
+              <small>${num2(week.hours)} Std. erfasst · Soll ${num2(week.target / 60)} Std.${week.adjustment ? ` · Korrektur ${week.adjustment} Min.` : ''}</small></span>
+            <span class="badge ${week.diff >= 0 ? 'bezahlt' : 'overdue'}">${week.diff >= 0 ? '+' : ''}${num2(week.diff_hours)} Std.</span>
+          </div>`).join('') || '<div class="small muted">Keine Zeiten im Zeitraum.</div>'}
+      </div>`,
+    footer: `
+      ${can('hr.manage') ? `
+        <button class="btn sm" type="button" data-action="vacation-entitlement" data-id="${employeeId}">Anspruch</button>
+        <button class="btn sm" type="button" data-action="time-adjustment" data-id="${employeeId}">Korrektur</button>` : ''}
+      <div class="spacer"></div>
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+}
+
+async function timeAdjustmentModal(employeeId) {
+  formModal({
+    title: 'Arbeitszeit korrigieren',
+    subtitle: 'Positiv = Gutschrift, negativ = Abzug',
+    fields: [
+      { name: 'date', label: 'Datum', type: 'date', required: true, default: todayISO() },
+      { name: 'minutes', label: 'Minuten', type: 'number', step: '1', required: true, default: 0,
+        hint: 'Beispiel: 60 = eine Stunde Gutschrift, -30 = halbe Stunde Abzug' },
+      { name: 'note', label: 'Grund', full: true, required: true, placeholder: 'z. B. Nachtrag Stempeleintrag' },
+    ],
+    onSubmit: async (data) => {
+      await api.post('/api/time-adjustments', { ...data, employee_id: employeeId });
+      closeModal();
+      toast('Korrektur gebucht.');
+      await hrAccountModal(employeeId);
+    },
+  });
+}
+
+function vacationEntitlementModal(employeeId) {
+  formModal({
+    title: 'Urlaubsanspruch setzen',
+    subtitle: 'Gilt für das laufende Jahr',
+    fields: [
+      { name: 'year', label: 'Jahr', type: 'number', required: true, default: new Date().getFullYear() },
+      { name: 'days', label: 'Tage', type: 'number', step: '0.5', required: true, default: 30 },
+      { name: 'note', label: 'Notiz', full: true },
+    ],
+    onSubmit: async (data) => {
+      await api.put('/api/vacation-entitlements', { ...data, employee_id: employeeId });
+      closeModal();
+      toast('Urlaubsanspruch gespeichert.');
+      await renderTeam();
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ Auftrag: Kalkulation, Aufmaß, Checklisten, Tagebuch, Unterschrift */
+
+async function orderCalculationModal(orderId) {
+  const data = await api.get(`/api/orders/${orderId}/calculation`);
+  const { order, items, config, planned, actual } = data;
+  const editable = can('calculation.manage');
+  openModal({
+    title: `Kalkulation ${order.number}`,
+    subtitle: `${order.title} · ${items.length} Positionen`,
+    size: 'wide',
+    body: `
+      <div class="kpi-grid tight">
+        <div class="kpi"><div class="label">Kosten geplant</div><div class="value">${money(planned.cost_total)}</div><div class="foot">Lohn, Material, Gerät</div></div>
+        <div class="kpi"><div class="label">Angebotswert netto</div><div class="value">${money(planned.revenue)}</div><div class="foot">Marge ${num2(planned.margin_pct)} %</div></div>
+        <div class="kpi"><div class="label">Ist-Kosten</div><div class="value">${money(actual.cost_total)}</div><div class="foot">${num2(actual.hours)} Std. erfasst</div></div>
+        <div class="kpi"><div class="label">Nachkalkulation</div><div class="value" style="color:${actual.margin_pct >= 0 ? 'var(--ok)' : 'var(--danger)'}">${num2(actual.margin_pct)} %</div><div class="foot">${money(actual.margin_amount)} Marge</div></div>
+      </div>
+      <form id="calc-form">
+        <div class="form-grid" style="margin-top:12px">
+          <div class="field"><label>Lohn (€/Std.)</label><input name="wage_rate" type="number" step="0.01" value="${config.wage_rate}" ${editable ? '' : 'disabled'} /></div>
+          <div class="field"><label>Gemeinkosten (%)</label><input name="overhead_pct" type="number" step="0.1" value="${config.overhead_pct}" ${editable ? '' : 'disabled'} /></div>
+          <div class="field"><label>Gewinn (%)</label><input name="profit_pct" type="number" step="0.1" value="${config.profit_pct}" ${editable ? '' : 'disabled'} /></div>
+          <div class="field"><label>Rabatt (%)</label><input name="discount_pct" type="number" step="0.1" value="${config.discount_pct}" ${editable ? '' : 'disabled'} /></div>
+        </div>
+        <div class="table-wrap" style="margin-top:12px">
+          <table class="compact-table">
+            <thead><tr><th>Position</th><th class="right">Menge</th><th class="right">VK netto</th><th class="right">Lohn</th><th class="right">Material</th><th class="right">Gerät</th><th class="right">Sonstig</th><th class="right">Marge</th></tr></thead>
+            <tbody>
+              ${items.map((item) => `
+                <tr>
+                  <td><b>${esc(item.description)}</b><div class="cell-sub">${esc(item.kind === 'arbeit' ? 'Lohn' : 'Material')}</div></td>
+                  <td class="right num">${num2(item.quantity)} ${esc(item.unit || '')}</td>
+                  <td class="right num">${money(item.net)}</td>
+                  ${['wage', 'material', 'equipment', 'other'].map((key) => `
+                    <td class="right"><input class="calc-input" name="cost_${key}_${item.id}" type="number" step="0.01"
+                      value="${item.costs[key]}" ${editable ? '' : 'disabled'} /></td>`).join('')}
+                  <td class="right num" style="color:${item.margin_pct >= 0 ? 'var(--ok)' : 'var(--danger)'}">${num2(item.margin_pct)} %</td>
+                </tr>`).join('') || '<tr><td colspan="8" class="muted">Keine Positionen erfasst.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div class="small muted" style="margin-top:8px">Zielpreis netto bei aktuellen Aufschlägen: <b>${money(planned.target_net)}</b>. „In Positionen übernehmen“ schreibt die kalkulierten Verkaufspreise fest.</div>
+      </form>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      ${editable ? `
+        <button class="btn" type="button" data-action="save-calculation" data-id="${orderId}">Speichern</button>
+        <button class="btn primary" type="button" data-action="apply-calculation" data-id="${orderId}">In Positionen übernehmen</button>` : ''}`,
+  });
+}
+
+function calculationPayload(orderId) {
+  const form = $('#calc-form');
+  if (!form) return null;
+  const items = $$('.calc-input', form).map((input) => {
+    const match = /^cost_(wage|material|equipment|other)_(\d+)$/.exec(input.name);
+    return match ? { id: Number(match[2]), key: match[1], value: input.value } : null;
+  }).filter(Boolean);
+  const grouped = new Map();
+  for (const item of items) {
+    if (!grouped.has(item.id)) grouped.set(item.id, { id: item.id });
+    grouped.get(item.id)[`cost_${item.key}`] = item.value;
+  }
+  return {
+    wage_rate: form.elements.wage_rate.value,
+    overhead_pct: form.elements.overhead_pct.value,
+    profit_pct: form.elements.profit_pct.value,
+    discount_pct: form.elements.discount_pct.value,
+    items: [...grouped.values()],
+  };
+}
+
+async function orderMeasurementsModal(orderId) {
+  const data = await api.get(`/api/orders/${orderId}/measurements`);
+  const rows = data.measurements || [];
+  openModal({
+    title: 'Aufmaß',
+    subtitle: `${rows.length} Positionen · ${num2(rows.reduce((sum, row) => sum + Number(row.quantity), 0))} Gesamtmenge`,
+    size: 'wide',
+    body: `
+      <div class="list-stack">
+        ${rows.length ? rows.map((row) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon('edit')}</span>
+            <span class="list-main"><b>${esc(row.description)}</b>
+              <small>${esc(row.room || 'ohne Raum')} · ${num2(row.quantity)} ${esc(row.unit)}${Number(row.length) ? ` · ${num2(row.length)} × ${num2(row.width)}${Number(row.height) ? ` × ${num2(row.height)}` : ''}` : ''}</small></span>
+            <span class="lr-actions">
+              <button class="icon-btn" type="button" data-action="delete-measurement" data-id="${orderId}" data-measurement="${row.id}" title="Löschen">${icon('trash')}</button>
+            </span>
+          </div>`).join('') : '<div class="small muted">Noch keine Aufmaßpositionen.</div>'}
+      </div>
+      ${can('orders.progress') ? `
+        <div class="hr"></div>
+        <div class="section-head compact"><div><h4>Position aufnehmen</h4></div></div>
+        <form id="measurement-form" class="form-grid">
+          <div class="field"><label>Raum / Bereich</label><input name="room" placeholder="z. B. Bad EG" /></div>
+          <div class="field"><label>Berechnung</label><select name="category">
+            ${Object.entries(data.categories || {}).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}
+          </select></div>
+          <div class="field full"><label>Bezeichnung *</label><input name="description" required placeholder="z. B. Fliesenarbeiten" /></div>
+          <div class="field"><label>Länge (m)</label><input name="length" type="number" step="0.01" value="0" /></div>
+          <div class="field"><label>Breite (m)</label><input name="width" type="number" step="0.01" value="0" /></div>
+          <div class="field"><label>Höhe (m)</label><input name="height" type="number" step="0.01" value="0" /></div>
+          <div class="field"><label>Anzahl</label><input name="count" type="number" step="1" value="1" /></div>
+          <div class="field"><label>Faktor</label><input name="factor" type="number" step="0.01" value="1" /></div>
+          <div class="field"><label>Einheit</label><input name="unit" placeholder="m²" /></div>
+          <div class="field"><label>Menge (frei)</label><input name="quantity" type="number" step="0.0001" value="0" /></div>
+        </form>` : ''}`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      ${can('orders.manage') && rows.length ? `<button class="btn" type="button" data-action="apply-measurements" data-id="${orderId}">Ins LV übernehmen</button>` : ''}
+      ${can('orders.progress') ? `<button class="btn primary" type="button" data-action="save-measurement" data-id="${orderId}">Position speichern</button>` : ''}`,
+  });
+}
+
+async function orderChecklistsModal(orderId) {
+  const data = await api.get(`/api/orders/${orderId}/checklists`);
+  const checklists = data.checklists || [];
+  const templates = data.templates || [];
+  openModal({
+    title: 'Checklisten',
+    subtitle: `${checklists.length} Listen`,
+    size: 'wide',
+    body: `
+      ${checklists.length ? checklists.map((list) => `
+        <div class="subcard" style="margin-bottom:12px">
+          <div class="section-head compact">
+            <div><h4>${esc(list.name)}</h4><div class="small muted">${list.done} von ${list.total} erledigt · ${list.percent} %</div></div>
+            ${can('orders.manage') ? `<button class="icon-btn" type="button" data-action="delete-checklist" data-id="${list.id}" data-order="${orderId}" title="Löschen">${icon('trash')}</button>` : ''}
+          </div>
+          <div class="progress"><span style="width:${list.percent}%"></span></div>
+          <div class="list-stack" style="margin-top:10px">
+            ${list.items.map((entry) => `
+              <label class="check-row">
+                <input type="checkbox" data-action="toggle-checklist-entry" data-checklist="${list.id}" data-entry="${entry.id}" ${entry.checked ? 'checked' : ''} ${can('orders.progress') ? '' : 'disabled'} />
+                <span>${esc(entry.label)}${entry.note ? `<small class="muted">${esc(entry.note)}</small>` : ''}</span>
+              </label>`).join('')}
+          </div>
+        </div>`).join('') : '<div class="small muted">Noch keine Checkliste.</div>'}
+      ${can('orders.progress') && templates.length ? `
+        <div class="hr"></div>
+        <div class="section-head compact"><div><h4>Checkliste aus Vorlage</h4></div></div>
+        <div class="form-grid">
+          <div class="field full"><label>Vorlage</label><select id="checklist-template">
+            ${templates.map((template) => `<option value="${template.id}">${esc(template.name)} (${template.items.length} Punkte)</option>`).join('')}
+          </select></div>
+        </div>` : ''}`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      ${can('orders.progress') && templates.length ? `<button class="btn primary" type="button" data-action="add-checklist" data-id="${orderId}">Checkliste anlegen</button>` : ''}`,
+  });
+}
+
+async function orderDiaryModal(orderId) {
+  const entries = await api.get(`/api/orders/${orderId}/diary`);
+  openModal({
+    title: 'Bautagebuch',
+    subtitle: `${entries.length} Einträge`,
+    size: 'wide',
+    body: `
+      <div class="list-stack">
+        ${entries.length ? entries.map((entry) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon('calendar')}</span>
+            <span class="list-main"><b>${fmtDate(entry.date)}${entry.weather ? ` · ${esc(entry.weather)}` : ''}</b>
+              <small>${esc(entry.work_done)}</small>
+              ${entry.personnel ? `<small class="muted">Personal: ${esc(entry.personnel)}</small>` : ''}
+              ${entry.material ? `<small class="muted">Material: ${esc(entry.material)}</small>` : ''}
+              ${entry.incidents ? `<small class="muted">Besonderheiten: ${esc(entry.incidents)}</small>` : ''}
+            </span>
+            ${can('orders.progress') ? `<button class="icon-btn" type="button" data-action="delete-diary" data-id="${orderId}" data-entry="${entry.id}" title="Löschen">${icon('trash')}</button>` : ''}
+          </div>`).join('') : '<div class="small muted">Noch keine Einträge.</div>'}
+      </div>
+      ${can('orders.progress') ? `
+        <div class="hr"></div>
+        <div class="section-head compact"><div><h4>Neuer Eintrag</h4></div></div>
+        <form id="diary-form" class="form-grid">
+          <div class="field"><label>Datum</label><input name="date" type="date" value="${todayISO()}" /></div>
+          <div class="field"><label>Wetter</label><input name="weather" placeholder="trocken, 12 °C" /></div>
+          <div class="field"><label>Temperatur</label><input name="temperature" placeholder="12 °C" /></div>
+          <div class="field"><label>Personal</label><input name="personnel" placeholder="2 Monteure" /></div>
+          <div class="field full"><label>Arbeiten *</label><textarea name="work_done" rows="3" required></textarea></div>
+          <div class="field full"><label>Material</label><textarea name="material" rows="2"></textarea></div>
+          <div class="field full"><label>Besonderheiten</label><textarea name="incidents" rows="2"></textarea></div>
+        </form>` : ''}`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      ${can('orders.progress') ? `<button class="btn primary" type="button" data-action="save-diary" data-id="${orderId}">Eintrag speichern</button>` : ''}`,
+  });
+}
+
+async function orderSignatureModal(orderId) {
+  const signatures = await api.get(`/api/orders/${orderId}/signatures`);
+  openModal({
+    title: 'Unterschrift',
+    subtitle: 'Digitale Abnahme direkt auf dem Gerät',
+    size: 'wide',
+    body: `
+      ${signatures.length ? `
+        <div class="section-head compact"><div><h4>Vorhandene Unterschriften</h4></div></div>
+        <div class="list-stack">
+          ${signatures.map((row) => `<div class="list-row static">
+            <span class="list-ico">${icon('check')}</span>
+            <span class="list-main"><b>${esc(row.customer_name)}</b><small>${fmtDateTime(row.signed_at)} · ${esc(row.user_name || '')}</small></span>
+            <a class="icon-btn" href="/api/signatures/${row.id}/file" target="_blank" rel="noopener" title="Ansehen">${icon('image')}</a>
+          </div>`).join('')}
+        </div>
+        <div class="hr"></div>` : ''}
+      <form id="signature-form" class="form-grid">
+        <div class="field full"><label>Name des Unterzeichners *</label><input name="customer_name" required /></div>
+        <div class="field full"><label>Notiz</label><input name="note" placeholder="z. B. Abnahme ohne Mängel" /></div>
+        <div class="field full">
+          <label>Unterschrift</label>
+          <canvas id="signature-pad" class="signature-pad" width="900" height="320"></canvas>
+          <div class="field-tools"><button class="btn sm ghost" type="button" data-action="clear-signature">Leeren</button></div>
+        </div>
+      </form>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      <button class="btn primary" type="button" data-action="save-signature" data-id="${orderId}">Unterschrift speichern</button>`,
+  });
+  initSignaturePad();
+}
+
+let signaturePadState = null;
+function initSignaturePad() {
+  const canvas = $('#signature-pad');
+  if (!canvas) return;
+  const ratio = Math.min(2, window.devicePixelRatio || 1);
+  const width = canvas.clientWidth || 600;
+  canvas.width = width * ratio;
+  canvas.height = 320 * ratio;
+  canvas.style.height = '220px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(ratio, ratio);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#111827';
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  let drawing = false;
+  let hasInk = false;
+  const point = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / ratio / rect.width;
+    const scaleY = canvas.height / ratio / rect.height;
+    return { x: (event.clientX - rect.left) * scaleX, y: (event.clientY - rect.top) * scaleY };
+  };
+  canvas.addEventListener('pointerdown', (event) => {
+    drawing = true;
+    hasInk = true;
+    canvas.setPointerCapture(event.pointerId);
+    const pos = point(event);
+    ctx.beginPath();
+    ctx.moveTo(pos.x, pos.y);
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!drawing) return;
+    const pos = point(event);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+  });
+  const stop = () => { drawing = false; };
+  canvas.addEventListener('pointerup', stop);
+  canvas.addEventListener('pointerleave', stop);
+  signaturePadState = { canvas, hasInk: () => hasInk, clear: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); hasInk = false; } };
+}
+
+async function orderDocumentsModal(orderId, orderNumber = '') {
+  const documents = await api.get(`/api/documents?order_id=${orderId}`);
+  openModal({
+    title: `Dokumente${orderNumber ? ` zu ${orderNumber}` : ''}`,
+    subtitle: 'Alles zur Projektakte',
+    body: `
+      <div class="list-stack">
+        ${documents.length ? documents.map((doc) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon('file')}</span>
+            <span class="list-main"><b>${esc(doc.title)}</b><small>${esc(DOCUMENT_CATEGORIES_UI[doc.category] || doc.category)} · ${documentSize(doc.size)} · ${fmtDate(doc.created_at)}</small></span>
+            <a class="icon-btn" href="/api/documents/${doc.id}/file" target="_blank" rel="noopener" title="Herunterladen">${icon('download')}</a>
+          </div>`).join('') : '<div class="small muted">Noch keine Dokumente zu diesem Auftrag.</div>'}
+      </div>`,
+    footer: `
+      ${can('documents.manage') ? `<button class="btn" type="button" data-action="upload-order-document" data-id="${orderId}">${icon('plus')} Dokument ablegen</button>` : ''}
+      <div class="spacer"></div>
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+}
+
+function orderGaebModal(orderId) {
+  openModal({
+    title: 'GAEB & OCI',
+    subtitle: 'Leistungsverzeichnis austauschen und Lieferantenbestellungen übernehmen',
+    body: `
+      <div class="section-head compact"><div><h4>GAEB X83 (DA83)</h4><div class="small muted">Export für Ausschreibungen, Import von Positionen</div></div></div>
+      <div class="nowrap" style="margin-bottom:10px">
+        <button class="btn sm" type="button" data-action="download-gaeb" data-id="${orderId}">${icon('download')} Exportieren</button>
+        <label class="btn sm ghost" style="display:inline-flex;cursor:pointer">
+          ${icon('plus')} Importieren
+          <input type="file" id="gaeb-file" accept=".x83,.xml,.txt" hidden />
+        </label>
+      </div>
+      <div class="hr"></div>
+      <div class="section-head compact"><div><h4>OCI-Bestellung</h4><div class="small muted">BMEcat-/OCI-XML des Lieferanten übernehmen</div></div></div>
+      <label class="btn sm ghost" style="display:inline-flex;cursor:pointer">
+        ${icon('download')} OCI importieren
+        <input type="file" id="oci-file" accept=".xml" hidden />
+      </label>`,
+    footer: `<button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+  $('#gaeb-file').addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+      const content = await readTextFile(file);
+      const result = await api.post(`/api/orders/${orderId}/gaeb/import`, { content });
+      toast(`${result.count} GAEB-Positionen importiert.`);
+      closeModal();
+      await openOrder(orderId);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+  $('#oci-file').addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+      const content = await readTextFile(file);
+      const result = await api.post(`/api/orders/${orderId}/oci/import`, { content });
+      toast(`${result.count} OCI-Positionen importiert.`);
+      closeModal();
+      await openOrder(orderId);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ Textassistent */
+
+const ASSISTANT_KINDS = {
+  angebot: 'Angebotstext',
+  mahnung: 'Zahlungserinnerung',
+  zusammenfassung: 'Auftragszusammenfassung',
+  checkliste: 'Checkliste',
+  email: 'E-Mail',
+};
+
+function assistantModal({ kind = 'angebot', orderId = null, invoiceId = null, customerId = null } = {}) {
+  openModal({
+    title: 'Textassistent',
+    subtitle: 'Erzeugt Entwürfe ausschließlich aus den vorhandenen Daten – ohne externe Dienste',
+    size: 'wide',
+    body: `
+      <div class="form-grid">
+        <div class="field"><label>Textart</label><select id="assistant-kind">
+          ${Object.entries(ASSISTANT_KINDS).map(([value, label]) => `<option value="${value}" ${value === kind ? 'selected' : ''}>${label}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>&nbsp;</label>
+          <button class="btn primary" type="button" data-action="run-assistant"
+            data-order="${orderId || ''}" data-invoice="${invoiceId || ''}" data-customer="${customerId || ''}">Entwurf erzeugen</button>
+        </div>
+        <div class="field full"><label>Zusatzhinweise</label><textarea id="assistant-extra" rows="2" placeholder="Optional: Ton, Termin oder besondere Hinweise"></textarea></div>
+        <div class="field full"><label>Ergebnis</label><textarea id="assistant-result" rows="12" placeholder="Noch kein Entwurf erzeugt."></textarea></div>
+      </div>`,
+    footer: `
+      <button class="btn" type="button" data-action="copy-assistant">Kopieren</button>
+      <div class="spacer"></div>
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+}
+
+async function runAssistant() {
+  const kind = $('#assistant-kind')?.value || 'angebot';
+  const extra = $('#assistant-extra')?.value || '';
+  const button = $('[data-action="run-assistant"]');
+  const result = $('#assistant-result');
+  if (!button || !result) return;
+  button.disabled = true;
+  try {
+    const draft = await api.post('/api/assistant/draft', {
+      kind,
+      extra,
+      order_id: button.dataset.order || null,
+      invoice_id: button.dataset.invoice || null,
+      customer_id: button.dataset.customer || null,
+    });
+    result.value = draft.text;
+    toast('Entwurf erzeugt.');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------------ Inventur & Scan */
+
+async function inventoryModal() {
+  const sessions = await api.get('/api/inventory');
+  openModal({
+    title: 'Inventur',
+    subtitle: `${sessions.length} Sitzungen`,
+    body: `
+      <div class="list-stack">
+        ${sessions.length ? sessions.map((session) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon('box')}</span>
+            <span class="list-main"><b>${esc(session.name)}</b>
+              <small>${session.counted} von ${session.articles} Artikeln gezählt · ${fmtDate(session.created_at)} · ${esc(session.status)}</small></span>
+            <span class="lr-actions">
+              <button class="btn sm" type="button" data-action="open-inventory" data-id="${session.id}">Öffnen</button>
+            </span>
+          </div>`).join('') : '<div class="small muted">Noch keine Inventur angelegt.</div>'}
+      </div>`,
+    footer: `
+      ${can('warehouse.manage') ? `<button class="btn primary" type="button" data-action="new-inventory">${icon('plus')} Neue Inventur</button>` : ''}
+      <div class="spacer"></div>
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+}
+
+function newInventoryModal() {
+  formModal({
+    title: 'Neue Inventur',
+    subtitle: 'Zählungen werden erst beim Abschluss in den Bestand übernommen',
+    fields: [
+      { name: 'name', label: 'Bezeichnung', required: true, default: `Inventur ${fmtDate(todayISO())}` },
+      { name: 'note', label: 'Notiz', type: 'textarea', rows: 2, full: true },
+    ],
+    onSubmit: async (data) => {
+      const session = await api.post('/api/inventory', data);
+      closeModal();
+      toast('Inventur angelegt.');
+      await inventorySessionModal(session.id);
+    },
+  });
+}
+
+async function inventorySessionModal(id) {
+  const data = await api.get(`/api/inventory/${id}`);
+  const { session, counts, articles, stats } = data;
+  const open = session.status === 'offen';
+  openModal({
+    title: session.name,
+    subtitle: `${stats.counted} von ${stats.total} gezählt · ${stats.differences} Abweichungen`,
+    size: 'wide',
+    body: `
+      <div class="kpi-grid tight">
+        <div class="kpi"><div class="label">Gezählt</div><div class="value">${stats.counted}</div><div class="foot">von ${stats.total}</div></div>
+        <div class="kpi"><div class="label">Abweichungen</div><div class="value">${stats.differences}</div><div class="foot">Positionen</div></div>
+        <div class="kpi"><div class="label">Status</div><div class="value" style="font-size:20px">${esc(session.status)}</div><div class="foot">${session.closed_at ? fmtDate(session.closed_at) : 'laufend'}</div></div>
+      </div>
+      ${open && can('warehouse.manage') ? `
+        <div class="hr"></div>
+        <form id="count-form" class="form-grid">
+          <div class="field full"><label>Artikel</label><select name="article_id" required>
+            ${articles.map((article) => `<option value="${article.id}">${esc(article.number)} · ${esc(article.name)} (Bestand ${num2(article.stock)} ${esc(article.unit || '')})</option>`).join('')}
+          </select></div>
+          <div class="field"><label>Gezählte Menge</label><input name="counted" type="number" step="0.001" min="0" required value="0" /></div>
+          <div class="field"><label>Notiz</label><input name="note" /></div>
+        </form>` : ''}
+      <div class="hr"></div>
+      <div class="list-stack">
+        ${counts.length ? counts.map((row) => `
+          <div class="list-row static">
+            <span class="list-ico">${icon('box')}</span>
+            <span class="list-main"><b>${esc(row.name)}</b><small>${esc(row.number)} · Soll ${num2(row.system_qty)} ${esc(row.unit || '')} · Ist ${num2(row.counted_qty)} ${esc(row.unit || '')}</small></span>
+            <span class="badge ${Math.abs(row.diff) < 0.0001 ? 'bezahlt' : 'overdue'}">${row.diff >= 0 ? '+' : ''}${num2(row.diff)}</span>
+          </div>`).join('') : '<div class="small muted">Noch keine Zählung erfasst.</div>'}
+      </div>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      ${open && can('warehouse.manage') ? `
+        <button class="btn" type="button" data-action="save-inventory-count" data-id="${id}">Zählung speichern</button>
+        <button class="btn primary" type="button" data-action="close-inventory" data-id="${id}">Abschließen</button>` : ''}`,
+  });
+}
+
+function scanArticleModal() {
+  openModal({
+    title: 'Artikel scannen',
+    subtitle: 'Barcode, GTIN oder Artikelnummer',
+    body: `
+      <form id="scan-form" class="form-grid">
+        <div class="field full"><label>Code</label>
+          <div style="display:flex;gap:8px">
+            <input name="code" autofocus autocomplete="off" placeholder="Code eingeben oder scannen" style="flex:1" />
+            <button class="btn primary" type="submit">Suchen</button>
+          </div>
+        </div>
+      </form>
+      <div id="scan-result"></div>`,
+    footer: `<button class="btn" type="button" data-action="close-modal">Schließen</button>`,
+  });
+  $('#scan-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const code = event.target.elements.code.value.trim();
+    if (!code) return;
+    try {
+      const { article } = await api.get(`/api/articles/lookup?code=${encodeURIComponent(code)}`);
+      const target = $('#scan-result');
+      if (!article) {
+        target.innerHTML = `<div class="notice warn" style="margin-top:12px">Kein Artikel zu „${esc(code)}“ gefunden.</div>`;
+        return;
+      }
+      target.innerHTML = `
+        <div class="subcard" style="margin-top:12px">
+          <div class="section-head compact"><div><h4>${esc(article.name)}</h4><div class="small muted">${esc(article.number)} · ${esc(article.category || '')} · ${esc(article.location || 'kein Lagerort')}</div></div>
+            <span class="badge ${Number(article.stock) <= Number(article.min_stock) ? 'overdue' : 'bezahlt'}">${num2(article.stock)} ${esc(article.unit || '')}</span></div>
+          ${can('warehouse.manage') ? `
+            <form id="scan-stock-form" class="form-grid" style="margin-top:10px">
+              <div class="field"><label>Menge</label><input name="quantity" type="number" step="0.001" required placeholder="z. B. 5 oder -2" /></div>
+              <div class="field"><label>Grund</label><input name="reason" placeholder="Wareneingang / Entnahme" /></div>
+              <div class="field full"><button class="btn primary" type="submit">Bestand buchen</button></div>
+            </form>` : ''}
+        </div>`;
+      const stockForm = $('#scan-stock-form');
+      if (stockForm) {
+        stockForm.addEventListener('submit', async (submitEvent) => {
+          submitEvent.preventDefault();
+          try {
+            await api.post(`/api/articles/${article.id}/stock`, {
+              quantity: Number(stockForm.elements.quantity.value),
+              reason: stockForm.elements.reason.value,
+            });
+            toast('Bestand gebucht.');
+            closeModal();
+            await renderWarehouse();
+          } catch (error) {
+            toast(error.message, 'error');
+          }
+        });
+      }
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ Vorlagen & Webhooks */
+
+function checklistTemplateModal(template = null) {
+  formModal({
+    title: template ? 'Vorlage bearbeiten' : 'Neue Checklistenvorlage',
+    subtitle: 'Ein Punkt pro Zeile',
+    fields: [
+      { name: 'name', label: 'Name', required: true, default: template?.name || '' },
+      { name: 'trade', label: 'Gewerk / Bereich', default: template?.trade || 'Allgemein' },
+      { name: 'items', label: 'Punkte', type: 'textarea', rows: 10, full: true, required: true, default: (template?.items || []).join('\n') },
+    ],
+    onSubmit: async (data) => {
+      if (template) await api.put(`/api/checklist-templates/${template.id}`, data);
+      else await api.post('/api/checklist-templates', data);
+      closeModal();
+      toast('Vorlage gespeichert.');
+      await renderSettings();
+    },
+  });
+}
+
+function webhookModal() {
+  formModal({
+    title: 'Webhook anlegen',
+    subtitle: 'HTTPS-Ziel, signiert mit HMAC-SHA256',
+    fields: [
+      { name: 'url', label: 'Ziel-URL', required: true, placeholder: 'https://example.com/hooks/handwerkpro' },
+      { name: 'events', label: 'Ereignisse (Komma-getrennt)', full: true, default: '*',
+        hint: 'Verfügbar: order.created, order.status, invoice.created, invoice.paid, customer.created, document.uploaded, report.approved oder *' },
+      { name: 'secret', label: 'Geheimnis', hint: 'Leer lassen für automatisch erzeugtes Geheimnis (wird nur einmal angezeigt).' },
+    ],
+    onSubmit: async (data) => {
+      const created = await api.post('/api/webhooks', { ...data, events: data.events.split(',').map((event) => event.trim()).filter(Boolean) });
+      closeModal();
+      await renderSettings();
+      if (created.secret && created.secret !== '********') {
+        openModal({
+          title: 'Webhook angelegt',
+          subtitle: 'Geheimnis jetzt notieren – es wird nur einmal angezeigt.',
+          body: `<div class="field"><label>Signatur-Geheimnis</label><input readonly value="${esc(created.secret)}" onclick="this.select()" /></div>`,
+          footer: `<button class="btn primary" type="button" data-action="close-modal">Verstanden</button>`,
+        });
+      } else {
+        toast('Webhook gespeichert.');
+      }
+    },
+  });
+}
+
+function einvoiceReferenceModal(invoiceId, buyerReference = '') {
+  formModal({
+    title: 'E-Rechnung: Referenz',
+    subtitle: 'Leitweg-ID bzw. Buyer Reference für XRechnung und ZUGFeRD',
+    fields: [
+      { name: 'buyer_reference', label: 'Leitweg-ID / Buyer Reference', full: true, default: buyerReference,
+        hint: 'Bei öffentlichen Auftraggebern die Leitweg-ID, sonst z. B. die Auftragsnummer des Kunden.' },
+      { name: 'einvoice_format', label: 'Format', type: 'select', default: 'xrechnung',
+        options: [{ value: 'xrechnung', label: 'XRechnung 3.0 (UBL)' }, { value: 'zugferd', label: 'ZUGFeRD 2.x (CII)' }] },
+    ],
+    onSubmit: async (data) => {
+      await api.put(`/api/invoices/${invoiceId}`, data);
+      closeModal();
+      toast('E-Rechnungsdaten gespeichert.');
+      await openInvoice(invoiceId);
+    },
+  });
+}
 
 /* ------------------------------------------------------------------ Init & Anmeldung */
 async function loadBase() {
