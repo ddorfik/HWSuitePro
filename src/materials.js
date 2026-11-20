@@ -271,6 +271,7 @@ function sourceConfigured(id, settings) {
 export function materialSources(settings = getSettings(), { withFields = false } = {}) {
   return MATERIAL_SOURCES.map((source) => ({
     id: source.id,
+    enabledKey: source.enabledKey,
     label: source.label,
     kind: source.kind,
     description: source.description,

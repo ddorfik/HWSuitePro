@@ -771,6 +771,10 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     const sourceList = await json(await call(chef.cookie, '/api/materials/sources'));
     assert.ok(sourceList.sources.length >= 9, 'Alle optionalen Materialquellen sind registriert');
     assert.ok(sourceList.sources.every((source) => typeof source.enabled === 'boolean'));
+    assert.ok(
+      sourceList.sources.every((source) => typeof source.enabledKey === 'string' && source.enabledKey.startsWith('mat_')),
+      'Jede Quelle liefert den Namen ihres Einstellungs-Schalters',
+    );
     assert.ok(sourceList.sources.some((source) => source.id === 'datanorm' && source.accept));
     assert.ok(sourceList.sources.every((source) => Array.isArray(source.fields)));
 

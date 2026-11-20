@@ -1825,7 +1825,13 @@ function propertyForm(property = null, customerId = null) {
 
 /* ------------------------------------------------------------------ Lager */
 async function renderWarehouse() {
-  const articles = await api.get('/api/articles');
+  const [articles, materialData] = await Promise.all([
+    api.get('/api/articles'),
+    // Quellen bei jedem Öffnen frisch laden – so wirkt eine Änderung in den
+    // Einstellungen sofort, ohne die Seite neu laden zu müssen.
+    api.get('/api/materials/sources').catch(() => null),
+  ]);
+  if (Array.isArray(materialData?.sources)) state.materialSources = materialData.sources;
   const showCosts = can('invoices.view');
   const canBook = can('warehouse.manage');
   const filter = state.warehouseFilter;
@@ -1966,6 +1972,14 @@ const materialLookupEnabled = () => (state.materialSources || [])
 const materialDealerEnabled = () => (state.materialSources || [])
   .some((source) => source.id === 'ids' && source.enabled);
 
+/** Quellenstand nach dem Speichern von Einstellungen neu einlesen. */
+async function refreshMaterialSources() {
+  try {
+    const data = await api.get('/api/materials/sources');
+    if (Array.isArray(data?.sources)) state.materialSources = data.sources;
+  } catch { /* Rechte/Netzwerk: alten Stand behalten */ }
+}
+
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1978,10 +1992,24 @@ function readFileAsBase64(file) {
   });
 }
 
-function openImportModal(preselect = '') {
+async function openImportModal(preselect = '') {
+  // Immer den gespeicherten Serverstand holen: Ein Schalter in den Einstellungen
+  // wirkt damit sofort, auch wenn die Seite noch den alten Stand im Speicher hat.
+  await refreshMaterialSources();
   const sources = materialImportSources();
   if (!sources.length) {
-    toast('Keine Importquelle eingeschaltet. Bitte unter Einstellungen → Material & Datenquellen aktivieren.', 'info');
+    openModal({
+      title: 'Keine Importquelle eingeschaltet',
+      subtitle: 'Datanorm, BMEcat und CSV müssen zuerst in den Einstellungen aktiviert werden.',
+      body: `<div class="small" style="line-height:1.7">
+        Unter <b>Einstellungen → Material &amp; Datenquellen</b> (ganz unten) die gewünschte
+        Importquelle einschalten und <b>Einstellungen speichern</b>. Danach steht sie hier
+        sofort zur Auswahl.
+      </div>`,
+      footer: `
+        <button class="btn" type="button" data-action="close-modal">Schließen</button>
+        <button class="btn primary" type="button" data-action="material-settings">Zu den Einstellungen</button>`,
+    });
     return;
   }
   const selected = sources.find((source) => source.id === preselect) || sources[0];
@@ -4002,13 +4030,14 @@ async function renderSettings() {
     event.preventDefault();
     const payload = {};
     $$('input, textarea, select', form).forEach((input) => {
-      if (!input.name) return;
+      if (!input.name || input.name === 'undefined') return;
       if (input.type === 'checkbox') payload[input.name] = input.checked ? '1' : '0';
       else payload[input.name] = input.value;
     });
     try {
       const result = await api.put('/api/settings', payload);
       state.settings = result.settings;
+      await refreshMaterialSources();
       applyBranding();
       toast('Einstellungen gespeichert.');
       updateBadges();
@@ -4208,6 +4237,7 @@ const ACTIONS = {
     });
   },
   'open-import': (id, el) => openImportModal(el?.dataset.source || ''),
+  'material-settings': () => { closeModal(); location.hash = '#/settings'; },
   'run-import': () => runImport(),
   'open-import-history': () => openImportHistory(),
   'open-lookup': () => openLookupModal(),
