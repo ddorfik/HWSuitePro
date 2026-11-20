@@ -14,6 +14,9 @@ const state = {
   customers: [],
   properties: [],
   articles: [],
+  materialSources: [],
+  materialImports: [],
+  lookupResults: [],
   weekStart: null,
   ordersFilter: 'offen',
   invoicesFilter: 'offen',
@@ -184,8 +187,9 @@ const api = {
     const response = await fetch(path, options);
     if (!response.ok) {
       let message = `Fehler ${response.status}`;
+      let data = null;
       try {
-        const data = await response.json();
+        data = await response.json();
         if (data?.error) message = data.error;
       } catch { /* ignore */ }
       const error = new Error(message);
@@ -1821,7 +1825,13 @@ function propertyForm(property = null, customerId = null) {
 
 /* ------------------------------------------------------------------ Lager */
 async function renderWarehouse() {
-  const articles = await api.get('/api/articles');
+  const [articles, materialData] = await Promise.all([
+    api.get('/api/articles'),
+    // Quellen bei jedem Öffnen frisch laden – so wirkt eine Änderung in den
+    // Einstellungen sofort, ohne die Seite neu laden zu müssen.
+    api.get('/api/materials/sources').catch(() => null),
+  ]);
+  if (Array.isArray(materialData?.sources)) state.materialSources = materialData.sources;
   const showCosts = can('invoices.view');
   const canBook = can('warehouse.manage');
   const filter = state.warehouseFilter;
@@ -1835,6 +1845,9 @@ async function renderWarehouse() {
   const stockValue = articles.reduce((sum, a) => sum + Number(a.stock) * Number(a.purchase_price), 0);
   const lowCount = articles.filter((a) => a.low).length;
   const categories = [...new Set(articles.map((a) => a.category))];
+  const canEnrich = canBook && materialLookupEnabled();
+  const canDealer = materialDealerEnabled();
+  const importSources = materialImportSources();
 
   view.innerHTML = `
     <div class="toolbar">
@@ -1844,6 +1857,9 @@ async function renderWarehouse() {
         <button class="chip ${filter === 'niedrig' ? 'active' : ''}" data-action="filter-warehouse" data-filter="niedrig">Nachbestellen <span class="count">${lowCount}</span></button>
       </div>
       <div class="spacer"></div>
+      ${canBook && importSources.length ? `<button class="btn sm" type="button" data-action="open-import">${icon('download')} Katalog importieren</button>` : ''}
+      ${canBook ? `<button class="btn sm ghost" type="button" data-action="open-lookup">${icon('search')} Material suchen</button>` : ''}
+      <button class="btn sm ghost" type="button" data-action="open-import-history">${icon('clock')} Importe</button>
       ${showCosts ? `<span class="muted small">Lagerwert: <b style="color:var(--ink)">${money(stockValue)}</b></span>` : ''}
     </div>
 
@@ -1854,7 +1870,7 @@ async function renderWarehouse() {
           <tbody>
             ${visible.length ? visible.map((article) => `
               <tr>
-                <td><div class="cell-main">${esc(article.name)}</div><div class="cell-sub">${esc(article.number)} · ${esc(article.supplier || '')}</div></td>
+                <td><div class="cell-main">${esc(article.name)}</div><div class="cell-sub">${esc(article.number)} · ${esc(article.supplier || '')}${article.gtin ? ` · GTIN ${esc(article.gtin)}` : ''}${article.manufacturer ? ` · ${esc(article.manufacturer)}` : ''}</div></td>
                 <td><span class="badge neutral">${esc(article.category)}</span></td>
                 <td class="right"><span class="badge ${article.low ? 'overdue' : 'bezahlt'}">${num2(article.stock)} ${esc(article.unit)}</span></td>
                 <td class="right muted">${num2(article.min_stock)} ${esc(article.unit)}</td>
@@ -1864,13 +1880,35 @@ async function renderWarehouse() {
                 ${canBook ? `<td class="right nowrap">
                   <button class="icon-btn" title="Wareneingang" data-action="stock-move" data-id="${article.id}" data-direction="1">${icon('plus')}</button>
                   <button class="icon-btn" title="Entnahme" data-action="stock-move" data-id="${article.id}" data-direction="-1">${icon('box')}</button>
+                  ${canEnrich ? `<button class="icon-btn" title="Daten aus Quellen anreichern" data-action="enrich-article" data-id="${article.id}">${icon('refresh')}</button>` : ''}
+                  ${canDealer ? `<button class="icon-btn" title="Im Händlershop öffnen" data-action="open-dealer" data-id="${article.id}">${icon('arrow')}</button>` : ''}
                   <button class="icon-btn" title="Bearbeiten" data-action="edit-article" data-id="${article.id}">${icon('edit')}</button>
                 </td>` : ''}
               </tr>`).join('') : `<tr><td colspan="${5 + (showCosts ? 2 : 0) + (canBook ? 1 : 0)}"><div class="empty">${icon('box')}<div>Keine Artikel gefunden</div></div></td></tr>`}
           </tbody>
         </table>
       </div>
-    </div>`;
+    </div>
+
+    ${state.materialImports.length ? `<div class="card" style="margin-top:14px">
+      <div class="card-head">
+        <div><h2>Letzte Katalogimporte</h2><div class="small muted">Neu angelegte und aktualisierte Artikel der letzten Importe.</div></div>
+        <button class="btn sm ghost" type="button" data-action="open-import-history">Alle anzeigen</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Datum</th><th>Quelle</th><th>Lieferant</th><th class="right">Neu</th><th class="right">Aktualisiert</th><th class="right">Fehler</th></tr></thead>
+          <tbody>${state.materialImports.map((row) => `<tr>
+            <td class="nowrap">${esc(fmtDateTime(row.created_at))}</td>
+            <td>${esc(row.source)}</td>
+            <td>${esc(row.supplier || '–')}</td>
+            <td class="right">${row.created}</td>
+            <td class="right">${row.updated}</td>
+            <td class="right">${row.errors ? `<span class="badge overdue">${row.errors}</span>` : '0'}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>` : ''}`;
 }
 
 function articleForm(article = null) {
@@ -1924,6 +1962,294 @@ function stockMoveForm(article, direction) {
       refresh();
     },
   });
+}
+
+/* ------------------------------------------------------------------ Materialquellen */
+const materialImportSources = () => (state.materialSources || [])
+  .filter((source) => source.kind === 'import' && source.enabled);
+const materialLookupEnabled = () => (state.materialSources || [])
+  .some((source) => ['icecat', 'upcitemdb', 'etim', 'dealer'].includes(source.id) && source.enabled);
+const materialDealerEnabled = () => (state.materialSources || [])
+  .some((source) => source.id === 'ids' && source.enabled);
+
+/** Quellenstand nach dem Speichern von Einstellungen neu einlesen. */
+async function refreshMaterialSources() {
+  try {
+    const data = await api.get('/api/materials/sources');
+    if (Array.isArray(data?.sources)) state.materialSources = data.sources;
+  } catch { /* Rechte/Netzwerk: alten Stand behalten */ }
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      resolve({ name: file.name, base64: result.slice(result.indexOf(',') + 1) });
+    };
+    reader.onerror = () => reject(new Error(`Datei ${file.name} konnte nicht gelesen werden.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function openImportModal(preselect = '') {
+  // Immer den gespeicherten Serverstand holen: Ein Schalter in den Einstellungen
+  // wirkt damit sofort, auch wenn die Seite noch den alten Stand im Speicher hat.
+  await refreshMaterialSources();
+  const sources = materialImportSources();
+  if (!sources.length) {
+    openModal({
+      title: 'Keine Importquelle eingeschaltet',
+      subtitle: 'Datanorm, BMEcat und CSV müssen zuerst in den Einstellungen aktiviert werden.',
+      body: `<div class="small" style="line-height:1.7">
+        Unter <b>Einstellungen → Material &amp; Datenquellen</b> (ganz unten) die gewünschte
+        Importquelle einschalten und <b>Einstellungen speichern</b>. Danach steht sie hier
+        sofort zur Auswahl.
+      </div>`,
+      footer: `
+        <button class="btn" type="button" data-action="close-modal">Schließen</button>
+        <button class="btn primary" type="button" data-action="material-settings">Zu den Einstellungen</button>`,
+    });
+    return;
+  }
+  const selected = sources.find((source) => source.id === preselect) || sources[0];
+  const settings = state.settings || {};
+  openModal({
+    title: 'Katalog importieren',
+    subtitle: 'Datanorm, BMEcat oder CSV – vorhandene Artikel werden aktualisiert, neue angelegt.',
+    size: 'wide',
+    body: `
+      <form id="import-form">
+        <div class="form-grid">
+          <div class="field">
+            <label>Quelle</label>
+            <select id="import-source">
+              ${sources.map((source) => `<option value="${source.id}" ${source.id === selected.id ? 'selected' : ''}>${esc(source.label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>Lieferant</label>
+            <input id="import-supplier" value="${esc(settings[`mat_${selected.id}_supplier`] || '')}" placeholder="z. B. Richter+Frenzel" />
+            <span class="hint">Leer lassen, um den Lieferanten aus der Datei zu verwenden.</span>
+          </div>
+          <div class="field full">
+            <label>Datei(en)</label>
+            <input id="import-files" type="file" multiple accept="${esc(selected.accept || '')}" />
+            <span class="hint">Bis zu 10 Dateien, je max. 64 MB (bitte entpackt). Datanorm: .001/.WRG/DATPREIS, BMEcat: XML, CSV: .csv/.txt.</span>
+          </div>
+          <div class="field">
+            <label>Aufschlag auf EK (%)</label>
+            <input id="import-markup" type="number" step="0.1" min="0" value="${esc(settings.mat_markup_default || 30)}" />
+          </div>
+        </div>
+        <div class="check-group" style="margin-top:12px">
+          <label class="check"><input type="checkbox" id="import-update-prices" ${settings.mat_import_update_prices === '1' ? 'checked' : ''} /> Einkaufspreise aktualisieren</label>
+          <label class="check"><input type="checkbox" id="import-keep-sale" ${settings.mat_import_keep_sale_price === '1' ? 'checked' : ''} /> Verkaufspreise behalten</label>
+          <label class="check"><input type="checkbox" id="import-update-stock" ${settings.mat_import_update_stock === '1' ? 'checked' : ''} /> Bestände übernehmen</label>
+        </div>
+        <div id="import-status" class="small muted" style="margin-top:12px">Bereit.</div>
+      </form>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Abbrechen</button>
+      <button class="btn primary" type="button" data-action="run-import">${icon('download')} Import starten</button>`,
+  });
+}
+
+async function runImport() {
+  const button = $('[data-action="run-import"]');
+  const status = $('#import-status');
+  const input = $('#import-files');
+  const files = [...(input?.files || [])];
+  if (!files.length) {
+    toast('Bitte mindestens eine Datei auswählen.', 'error');
+    return;
+  }
+  if (files.length > 10) {
+    toast('Bitte höchstens 10 Dateien auf einmal importieren.', 'error');
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    if (status) status.textContent = 'Dateien werden gelesen …';
+    const payloadFiles = await Promise.all(files.map(readFileAsBase64));
+    if (status) status.textContent = 'Import läuft … das kann bei großen Katalogen etwas dauern.';
+    const result = await api.post('/api/materials/import', {
+      source: $('#import-source')?.value || '',
+      supplier: $('#import-supplier')?.value.trim() || '',
+      files: payloadFiles,
+      options: {
+        markup: Number($('#import-markup')?.value || 0),
+        updatePrices: $('#import-update-prices')?.checked,
+        keepSalePrice: $('#import-keep-sale')?.checked,
+        updateStock: $('#import-update-stock')?.checked,
+      },
+    });
+    if (status) {
+      status.innerHTML = `<b>${esc(result.summary)}</b>
+        ${result.details?.length ? `<div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>Zeile</th><th>Artikel</th><th>Fehler</th></tr></thead><tbody>
+          ${result.details.map((entry) => `<tr><td>${esc(entry.line ?? '–')}</td><td>${esc(entry.number || '–')}</td><td>${esc(entry.message)}</td></tr>`).join('')}
+        </tbody></table></div>` : ''}`;
+    }
+    toast(result.summary, result.errors ? 'info' : 'success');
+    await loadBase();
+    refresh();
+  } catch (error) {
+    if (status) status.textContent = error.message;
+    toast(error.message, 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function openImportHistory() {
+  openModal({
+    title: 'Import-Historie',
+    subtitle: 'Die letzten Katalogimporte mit Ergebnis und Fehlern.',
+    size: 'xwide',
+    body: '<div id="import-history"><div class="empty">Lade …</div></div>',
+    footer: '<button class="btn" type="button" data-action="close-modal">Schließen</button>',
+  });
+  try {
+    const rows = await api.get('/api/materials/imports?limit=50');
+    const target = $('#import-history');
+    if (!target) return;
+    target.innerHTML = rows.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Datum</th><th>Quelle</th><th>Lieferant</th><th>Datei</th><th class="right">Neu</th><th class="right">Aktualisiert</th><th class="right">Fehler</th><th>Von</th></tr></thead>
+      <tbody>${rows.map((row) => `<tr>
+        <td class="nowrap">${esc(fmtDateTime(row.created_at))}</td>
+        <td>${esc(row.source)}</td>
+        <td>${esc(row.supplier || '–')}</td>
+        <td class="small">${esc(row.filename || '–')}</td>
+        <td class="right">${row.created}</td>
+        <td class="right">${row.updated}</td>
+        <td class="right">${row.errors ? `<span class="badge overdue">${row.errors}</span>` : '0'}</td>
+        <td>${esc(row.user_name || '–')}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>` : '<div class="empty">Noch keine Importe.</div>';
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function openLookupModal() {
+  openModal({
+    title: 'Material suchen',
+    subtitle: 'GTIN/EAN, Artikelnummer oder Suchbegriff – abhängig von den eingeschalteten Quellen.',
+    size: 'wide',
+    body: `
+      <form id="lookup-form">
+        <div class="form-grid">
+          <div class="field"><label>GTIN / EAN</label><input id="lookup-gtin" placeholder="z. B. 4012345678901" /></div>
+          <div class="field"><label>Artikelnummer</label><input id="lookup-article" placeholder="Hersteller- oder Händlerartikelnummer" /></div>
+          <div class="field"><label>Hersteller / Marke</label><input id="lookup-manufacturer" placeholder="z. B. Viega" /></div>
+          <div class="field full"><label>Suchbegriff (ETIM)</label><input id="lookup-query" placeholder="z. B. Pressfitting" /></div>
+        </div>
+      </form>
+      <div id="lookup-results" style="margin-top:14px"></div>`,
+    footer: `
+      <button class="btn" type="button" data-action="close-modal">Schließen</button>
+      <button class="btn primary" type="button" data-action="run-lookup">${icon('search')} Suchen</button>`,
+  });
+}
+
+async function runLookup() {
+  const button = $('[data-action="run-lookup"]');
+  const target = $('#lookup-results');
+  if (button) button.disabled = true;
+  if (target) target.innerHTML = '<div class="small muted">Suche läuft …</div>';
+  try {
+    const result = await api.post('/api/materials/lookup', {
+      gtin: $('#lookup-gtin')?.value.trim() || '',
+      articleNumber: $('#lookup-article')?.value.trim() || '',
+      manufacturer: $('#lookup-manufacturer')?.value.trim() || '',
+      query: $('#lookup-query')?.value.trim() || '',
+    });
+    state.lookupResults = result.results || [];
+    if (!target) return;
+    target.innerHTML = `
+      ${result.gtin?.gtin ? `<div class="small" style="margin-bottom:8px">GTIN ${esc(result.gtin.gtin)}: <b>${result.gtin.valid ? 'Prüfziffer gültig' : 'Prüfziffer ungültig'}</b>${result.gtin.gs1Url ? ` · <a href="${esc(result.gtin.gs1Url)}" target="_blank" rel="noopener noreferrer">bei GS1 prüfen</a>` : ''}</div>` : ''}
+      ${(result.warnings || []).length ? `<div class="small" style="color:#b45309;margin-bottom:8px">${result.warnings.map(esc).join('<br />')}</div>` : ''}
+      ${state.lookupResults.length ? state.lookupResults.map((entry, index) => `
+        <div class="lookup-result">
+          <div class="lr-main">
+            <div class="lr-title">${esc(entry.name || entry.sourceId || 'Treffer')} <span class="badge neutral">${esc(entry.source)}</span></div>
+            <div class="small muted">${[entry.manufacturer, entry.sourceId, entry.gtin, entry.category].filter(Boolean).map(esc).join(' · ')}</div>
+            ${entry.attributes?.length ? `<div class="small muted">${entry.attributes.slice(0, 6).map((attribute) => esc(`${attribute.label}: ${attribute.value}`)).join(' · ')}</div>` : ''}
+          </div>
+          <div class="lr-side">
+            ${entry.purchasePrice ? `<div class="num">${money(entry.purchasePrice)}</div>` : ''}
+            <button class="btn sm" type="button" data-action="adopt-lookup" data-index="${index}">${icon('plus')} Als Artikel</button>
+          </div>
+        </div>`).join('') : '<div class="empty">Keine Treffer. Bitte Zugangsdaten und Suchbegriff prüfen.</div>'}`;
+  } catch (error) {
+    if (target) target.innerHTML = `<div class="small" style="color:#b91c1c">${esc(error.message)}</div>`;
+    toast(error.message, 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function adoptLookup(index) {
+  const entry = state.lookupResults[index];
+  if (!entry) return;
+  const purchase = Number(entry.purchasePrice) || 0;
+  const markup = Number(state.settings.mat_markup_default) || 30;
+  try {
+    await api.post('/api/articles', {
+      number: entry.sourceId || '',
+      name: entry.name || entry.sourceId || 'Artikel aus Datenquelle',
+      category: entry.category || 'Material',
+      unit: entry.unit || 'Stk',
+      purchase_price: purchase,
+      sale_price: Math.round(purchase * (1 + markup / 100) * 100) / 100,
+      stock: 0,
+      min_stock: 0,
+      supplier: entry.manufacturer || '',
+      gtin: entry.gtin || '',
+      manufacturer: entry.manufacturer || '',
+      manufacturer_number: entry.manufacturerNumber || '',
+      etim_class: entry.etimClass || '',
+      datasheet_url: entry.datasheetUrl || '',
+      image_url: entry.imageUrl || '',
+      source: entry.source || '',
+      source_id: entry.sourceId || '',
+    });
+    toast('Artikel angelegt.');
+    closeModal();
+    await loadBase();
+    refresh();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function enrichArticle(id) {
+  const button = $(`[data-action="enrich-article"][data-id="${id}"]`);
+  if (button) button.disabled = true;
+  try {
+    const result = await api.post(`/api/materials/articles/${id}/enrich`, {});
+    if (result.applied?.length) {
+      toast(`Artikel angereichert: ${result.applied.join(', ')}.`);
+      await loadBase();
+      refresh();
+    } else {
+      toast(result.warnings?.length ? result.warnings.join(' ') : 'Keine neuen Daten gefunden.', 'info');
+    }
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function openDealerLink(id) {
+  try {
+    const result = await api.get(`/api/materials/deep-link/${id}`);
+    if (!result.url) throw new Error('Kein Shop-Link hinterlegt.');
+    window.open(result.url, '_blank', 'noopener,noreferrer');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 /* ------------------------------------------------------------------ Verträge */
@@ -3412,8 +3738,89 @@ function uploadPhoto(orderId, kind = 'sonstiges', reportId = null, { multiple = 
 }
 
 /* ------------------------------------------------------------------ Einstellungen */
+function materialSourceField(field, settings) {
+  const value = settings[field.key] ?? '';
+  const hint = field.hint ? `<span class="hint">${esc(field.hint)}</span>` : '';
+  const full = field.full ? ' full' : '';
+  if (field.type === 'checkbox') {
+    return `<div class="field${full}">
+      <label class="check"><input type="checkbox" name="${field.key}" ${value === '1' ? 'checked' : ''} /> ${esc(field.checkLabel || field.label)}</label>
+      ${hint}
+    </div>`;
+  }
+  let control;
+  if (field.type === 'select') {
+    control = `<select name="${field.key}">
+      ${(field.options || []).map((option) => `<option value="${esc(option.value)}" ${String(option.value) === String(value) ? 'selected' : ''}>${esc(option.label)}</option>`).join('')}
+    </select>`;
+  } else {
+    const type = field.type === 'password' ? 'password' : 'text';
+    control = `<input type="${type}" name="${field.key}" value="${esc(value)}"
+      placeholder="${esc(field.placeholder || '')}" ${type === 'password' ? 'autocomplete="new-password"' : ''} />`;
+  }
+  return `<div class="field${full}"><label>${esc(field.label)}</label>${control}${hint}</div>`;
+}
+
+function materialSettingsCard(settings, sources) {
+  const toggle = (name, title, sub) => `
+    <div class="toggle-row">
+      <div class="tr-main"><div class="tr-title">${title}</div><div class="tr-sub">${sub}</div></div>
+      <label class="switch"><input type="checkbox" name="${name}" ${settings[name] === '1' ? 'checked' : ''} /><span></span></label>
+    </div>`;
+  const kindLabel = (kind) => (kind === 'import' ? 'Datei-Import' : kind === 'lookup' ? 'Abfrage' : 'Händler-API');
+  const cards = (sources || []).map((source) => {
+    const enabled = settings[source.enabledKey] === '1';
+    const fields = source.fields || [];
+    const basic = fields.filter((field) => !field.advanced);
+    const advanced = fields.filter((field) => field.advanced);
+    return `<div class="source-card ${enabled ? 'on' : ''}">
+      <div class="source-head">
+        <div class="source-main">
+          <div class="source-title">
+            <b>${esc(source.label)}</b>
+            <span class="badge neutral">${kindLabel(source.kind)}</span>
+            ${source.configured ? '' : '<span class="badge overdue">Zugang fehlt</span>'}
+          </div>
+          <div class="small muted">${esc(source.description)}</div>
+        </div>
+        <label class="switch"><input type="checkbox" name="${source.enabledKey}" ${enabled ? 'checked' : ''} data-source-toggle /><span></span></label>
+      </div>
+      ${basic.length ? `<div class="form-grid source-fields">${basic.map((field) => materialSourceField(field, settings)).join('')}</div>` : ''}
+      ${advanced.length ? `<details class="source-advanced"><summary>Erweitert & Feldzuordnung</summary><div class="form-grid">${advanced.map((field) => materialSourceField(field, settings)).join('')}</div></details>` : ''}
+      <div class="source-actions">
+        ${source.test ? `<button type="button" class="btn sm" data-action="test-source" data-id="${source.id}">${icon('refresh')} Verbindung testen</button>` : ''}
+        ${source.kind === 'import' ? `<button type="button" class="btn sm" data-action="open-import" data-source="${source.id}">${icon('download')} Import starten</button>` : ''}
+        ${source.docs ? `<a class="btn sm ghost" href="${esc(source.docs)}" target="_blank" rel="noopener noreferrer">Doku</a>` : ''}
+        <span class="small muted" data-source-test-result="${source.id}"></span>
+      </div>
+    </div>`;
+  }).join('');
+
+  return `<div class="card form-card full" id="material-sources-card">
+    <h2>Material & Datenquellen</h2>
+    <div class="fc-sub">Alle Quellen sind optional. Schalte nur ein, was der Betrieb wirklich nutzt – ausgeschaltete Quellen werden weder abgefragt noch importiert. Zugangsdaten bleiben lokal und werden nur an berechtigte Rollen ausgeliefert.</div>
+    <div class="form-grid">
+      <div class="field">
+        <label>Aufschlag auf Einkaufspreis (%)</label>
+        <input type="number" step="0.1" min="0" name="mat_markup_default" value="${esc(settings.mat_markup_default)}" />
+        <span class="hint">Wird beim Import verwendet, wenn kein Verkaufspreis in der Datei steht.</span>
+      </div>
+    </div>
+    ${toggle('mat_import_update_prices', 'Einkaufspreise aktualisieren', 'Neue Preise aus Importen übernehmen. Aus = vorhandene EK-Preise bleiben.')}
+    ${toggle('mat_import_keep_sale_price', 'Verkaufspreise behalten', 'Bereits gepflegte VK-Preise nicht überschreiben.')}
+    ${toggle('mat_import_update_stock', 'Bestände aus Importen übernehmen', 'Nur einschalten, wenn die Datei verlässliche Lagerbestände enthält.')}
+    ${toggle('mat_allow_http', 'HTTP für lokale Tests erlauben', 'Standardmäßig sind nur HTTPS-Adressen erlaubt. Nur für Testserver im eigenen Netz aktivieren.')}
+    <div class="hr"></div>
+    <div class="source-list">${cards || '<div class="empty">Keine Datenquellen verfügbar.</div>'}</div>
+    <div class="small muted" style="margin-top:10px">Einstellungen zuerst speichern – Verbindungstest und Import nutzen die gespeicherten Werte. Lizenz- und Vertragsbedingungen der jeweiligen Quelle beachten (z. B. Icecat, ETIM, Händler-API).</div>
+  </div>`;
+}
+
 async function renderSettings() {
   const { settings, security = {} } = await api.get('/api/settings');
+  const materialData = can('settings.manage')
+    ? await api.get('/api/materials/sources').catch(() => ({ sources: [] }))
+    : { sources: [] };
   const demoAccounts = security.demo_accounts || [];
   const insecureNetwork = security.https === false
     && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
@@ -3604,6 +4011,8 @@ async function renderSettings() {
             <a class="btn sm" href="/api/export/lager.csv">${icon('download')} Lager exportieren</a>
           </div>
         </div>
+
+        ${materialSettingsCard(settings, materialData.sources)}
       </div>
 
       <div style="display:flex;justify-content:flex-end;margin-top:16px">
@@ -3612,17 +4021,23 @@ async function renderSettings() {
     </form>`;
 
   const form = $('#settings-form');
+  $$('[data-source-toggle]', form).forEach((toggle) => {
+    toggle.addEventListener('change', () => {
+      toggle.closest('.source-card')?.classList.toggle('on', toggle.checked);
+    });
+  });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const payload = {};
     $$('input, textarea, select', form).forEach((input) => {
-      if (!input.name) return;
+      if (!input.name || input.name === 'undefined') return;
       if (input.type === 'checkbox') payload[input.name] = input.checked ? '1' : '0';
       else payload[input.name] = input.value;
     });
     try {
       const result = await api.put('/api/settings', payload);
       state.settings = result.settings;
+      await refreshMaterialSources();
       applyBranding();
       toast('Einstellungen gespeichert.');
       updateBadges();
@@ -3820,6 +4235,30 @@ const ACTIONS = {
       const article = articles.find((a) => a.id === Number(id));
       if (article) articleForm(article);
     });
+  },
+  'open-import': (id, el) => openImportModal(el?.dataset.source || ''),
+  'material-settings': () => { closeModal(); location.hash = '#/settings'; },
+  'run-import': () => runImport(),
+  'open-import-history': () => openImportHistory(),
+  'open-lookup': () => openLookupModal(),
+  'run-lookup': () => runLookup(),
+  'adopt-lookup': (id, el) => adoptLookup(Number(el.dataset.index)),
+  'enrich-article': (id) => enrichArticle(Number(id)),
+  'open-dealer': (id) => openDealerLink(Number(id)),
+  'test-source': async (id, el) => {
+    const target = $(`[data-source-test-result="${el.dataset.id}"]`);
+    el.disabled = true;
+    if (target) target.textContent = 'Teste …';
+    try {
+      const result = await api.post(`/api/materials/sources/${el.dataset.id}/test`, {});
+      if (target) target.textContent = result.message || 'Verbindung erfolgreich.';
+      toast(result.message || 'Verbindung erfolgreich.');
+    } catch (error) {
+      if (target) target.textContent = error.message;
+      toast(error.message, 'error');
+    } finally {
+      el.disabled = false;
+    }
   },
   'stock-move': (id, el) => {
     api.get('/api/articles').then((articles) => {
@@ -4153,18 +4592,22 @@ window.addEventListener('hashchange', navigate);
 /* ------------------------------------------------------------------ Init & Anmeldung */
 async function loadBase() {
   const safe = (promise, fallback) => promise.catch(() => fallback);
-  const [settingsResponse, employees, customers, properties, articles] = await Promise.all([
+  const [settingsResponse, employees, customers, properties, articles, materialData, materialImports] = await Promise.all([
     api.get('/api/settings'),
     can('employees.view') ? safe(api.get('/api/employees'), []) : [],
     can('customers.view') ? safe(api.get('/api/customers'), []) : [],
     can('customers.view') ? safe(api.get('/api/properties'), []) : [],
     can('warehouse.view') ? safe(api.get('/api/articles'), []) : [],
+    can('warehouse.view') ? safe(api.get('/api/materials/sources'), { sources: [] }) : { sources: [] },
+    can('warehouse.view') ? safe(api.get('/api/materials/imports?limit=8'), []) : [],
   ]);
   state.settings = settingsResponse.settings;
   state.employees = employees;
   state.customers = customers;
   state.properties = properties;
   state.articles = articles;
+  state.materialSources = materialData?.sources ?? [];
+  state.materialImports = Array.isArray(materialImports) ? materialImports : [];
 }
 
 async function refreshBadgesOnly() {
@@ -4372,7 +4815,7 @@ async function init() {
     const me = await api.get('/api/auth/me');
     await enterApp(me);
   } catch (error) {
-    if (error.status !== 401) console.error('App-Start fehlgeschlagen', error);
+    if (error.status !== 401) console.error('App-Start fehlgeschlagen', error?.stack || error);
     showLogin();
   }
 

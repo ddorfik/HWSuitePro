@@ -215,6 +215,24 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 - Wareneingang, Entnahme und Korrekturen mit Lagerhistorie
 - Warnungen bei Unterschreitung des Mindestbestands
 - Automatische Abbuchung bei Rechnungserstellung und bei Berichtsmaterial
+- **Katalogimport** aus Datanorm 4 (`.001`, `.WRG`, DATPREIS), BMEcat (XML) und CSV/Excel-Export
+  – vorhandene Artikel werden aktualisiert, neue angelegt, Fehler je Zeile protokolliert
+- Import-Historie mit Quelle, Lieferant, Datei, Neu/Aktualisiert/Fehlern und Benutzer
+- **Optionale Datenquellen** (unter Einstellungen → Material & Datenquellen einzeln schaltbar):
+  - **Open Icecat** – Produktdatenblätter, Bilder und Merkmale per GTIN/EAN
+  - **ETIM-Klassifikation** – Klassen und Merkmale über die offizielle ETIM-API (OAuth2)
+  - **UPCitemdb** – Barcode-Lookup (kostenlose Teststufe oder eigener Schlüssel)
+  - **GS1/GTIN-Prüfung** – Prüfziffer und Link zu „Verified by GS1" (lokal, ohne Schlüssel)
+  - **Händler-API (REST/JSON)** – generischer Connector für Großhändler mit Vertrag;
+    Authentifizierung per Bearer, Basic oder API-Key, konfigurierbare Pfade und Feldzuordnung
+  - **IDS-Connect / Händlershop** – Deep-Link zum Artikel im Shop des Händlers
+- **Anreichern**: fehlende GTIN, Hersteller, Herstellernummer, ETIM-Klasse, Datenblatt oder
+  Bild direkt am Artikel nachladen – nur aus den eingeschalteten Quellen
+
+> Alle Quellen sind **optional** und standardmäßig aus. Ohne eingeschaltete Quelle finden
+> keine externen Abfragen statt. Für Icecat, ETIM und Händler-APIs gelten die jeweiligen
+> Lizenz- und Vertragsbedingungen; die Zugangsdaten bleiben lokal in der Datenbank.
+> Beim Import werden nur die Dateien verarbeitet, die der Betrieb selbst auswählt.
 
 ### Wartungsverträge
 
@@ -229,6 +247,9 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 - Nummernkreise, Zahlungsziel, Stundensatz, Rechnungstexte
 - Automatik einzeln schaltbar, Mahnfrist und Mahngebühr
 - Teamverwaltung, Benutzerkonten und Rollen (Chef)
+- **Material & Datenquellen** (ganz unten): pro Quelle ein Ein/Aus-Schalter plus die nötigen
+  Zugangsdaten; Importoptionen (Aufschlag, EK/VK/Bestand übernehmen) und HTTP-Freigabe für
+  lokale Tests. Zugangsdaten sieht und ändert nur, wer Einstellungen verwalten darf.
 - CSV-Exporte für Kunden, Aufträge, Rechnungen und Lager
 
 ---
@@ -324,7 +345,12 @@ SMTP-Client (`src/mail.js`) – weiterhin ohne npm-Abhängigkeiten.
 - Rechte werden ausschließlich serverseitig geprüft; neue Routen sind standardmäßig gesperrt,
   bis ein Recht (oder `public`/`authenticated`) gesetzt ist.
 - Einstellungen werden je Rolle gefiltert: SMTP-Zugang und Bankdaten sieht nur, wer sie braucht;
-  das SMTP-Passwort wird nie im Klartext ausgeliefert.
+  das SMTP-Passwort wird nie im Klartext ausgeliefert. Material-Zugangsdaten (Icecat, ETIM,
+  UPCitemdb, Händler-API) sind zusätzlich maskiert und für andere Rollen gar nicht sichtbar.
+- Externe Materialquellen sind optional. Abfragen laufen nur für eingeschaltete Quellen,
+  ausschließlich über HTTPS (HTTP nur per bewusster Testeinstellung), mit Zeitlimit,
+  Größenlimit, SSRF-Schutz (keine privaten/Loopback-Adressen) und ohne Weiterleitung in
+  private Netze. Importdateien werden auf 10 Dateien à 64 MB begrenzt.
 - Sicherheitsheader (`CSP`, `X-Frame-Options`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`);
   bei HTTPS zusätzlich `Strict-Transport-Security`.
 - Ändernde Anfragen mit fremdem `Origin` werden abgelehnt (CSRF-Schutz zusätzlich zu `SameSite`).
@@ -350,6 +376,7 @@ GasWasserPro/
 │   ├── password.js         scrypt-Hashing
 │   ├── permissions.js      Rollen und Rechte-Matrix
 │   ├── work.js             Materialparser, Fotos, Zeiterfassung
+│   ├── materials.js        Katalogimporte (Datanorm/BMEcat/CSV), Icecat/ETIM/Händler-APIs
 │   ├── mail.js             SMTP-Versand ohne Abhängigkeiten
 │   ├── api.js              REST-API inkl. Auth- und Rechteprüfung
 │   ├── billing.js          Rechnungen, Zahlungen, Mahnungen, Lagerbuchungen
@@ -436,6 +463,14 @@ POST   /api/public/appointments/:token/decline   Kunde lehnt ab (mit Nachricht)
 
 GET    /api/articles                  Lager
 POST   /api/articles/:id/stock        Lagerbuchung
+GET    /api/materials/sources         Registrierte Materialquellen (Felder nur mit settings.manage)
+POST   /api/materials/sources/:id/test  Verbindung einer Quelle testen
+POST   /api/materials/import          Datanorm/BMEcat/CSV importieren (Base64-Dateien)
+GET    /api/materials/imports         Import-Historie
+POST   /api/materials/lookup          GTIN/Artikelnummer/Suchbegriff abfragen
+POST   /api/materials/articles/:id/enrich   Artikel aus Quellen anreichern
+GET    /api/materials/deep-link/:id   Händlershop-Link zum Artikel
+GET    /api/materials/gtin/:value     GTIN-Format und Prüfziffer prüfen
 GET    /api/contracts                 Wartungsverträge
 POST   /api/contracts/:id/order       Auftrag aus Vertrag erzeugen
 GET    /api/users                     Benutzerkonten (Chef)
