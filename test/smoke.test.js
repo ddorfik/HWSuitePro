@@ -10,13 +10,21 @@ const directory = mkdtempSync(join(tmpdir(), 'handwerkpro-test-'));
 process.env.GASWASSER_DATA = directory;
 process.env.GASWASSER_DB = join(directory, 'test.db');
 
-const { db, invoiceTotals } = await import('../src/db.js');
+const { db, invoiceTotals, getSettings } = await import('../src/db.js');
 const billing = await import('../src/billing.js');
 const { runAutomation } = await import('../src/automation.js');
 const { verifyPassword } = await import('../src/password.js');
 const { permissionsFor, can } = await import('../src/permissions.js');
 const { parseMaterials } = await import('../src/work.js');
 const materials = await import('../src/materials.js');
+const einvoice = await import('../src/einvoice.js');
+const dms = await import('../src/dms.js');
+const calc = await import('../src/calc.js');
+const hr = await import('../src/hr.js');
+const finance = await import('../src/finance.js');
+const site = await import('../src/site.js');
+const inventory = await import('../src/inventory.js');
+const interfaces = await import('../src/interfaces.js');
 
 const invoiceCount = () => db.prepare('SELECT COUNT(*) AS n FROM invoices').get().n;
 
@@ -914,6 +922,363 @@ test('Login, Rollen, Zeiten, Berichte, Fotos und Sprachsuche über HTTP', async 
     assert.equal((await call(chef.cookie, '/api/dashboard')).status, 401);
   } finally {
     smtpServer.close();
+    child.kill();
+  }
+});
+
+/* ============================================================================
+ * HERO-Parität: E-Rechnung, DMS, Kalkulation, Personal, Finanzen, Baustelle,
+ * Inventur und Schnittstellen.
+ * ========================================================================== */
+
+test('E-Rechnung erzeugt XRechnung, ZUGFeRD-XML und eingebettetes PDF', () => {
+  const invoice = db.prepare("SELECT * FROM invoices WHERE status != 'storniert' ORDER BY id LIMIT 1").get();
+  assert.ok(invoice, 'Eine Rechnung ist vorhanden');
+  const data = billing.loadInvoiceData(invoice.id);
+  const settings = getSettings();
+
+  const ubl = einvoice.buildXRechnung(data, settings);
+  assert.match(ubl, /xrechnung_3\.0/);
+  assert.match(ubl, /<cbc:PayableAmount currencyID="EUR">/);
+  assert.match(ubl, /<cbc:InvoiceTypeCode>380<\/cbc:InvoiceTypeCode>/);
+
+  const cii = einvoice.buildZugferdXml(data, settings);
+  assert.match(cii, /CrossIndustryInvoice/);
+  assert.match(cii, /<ram:DuePayableAmount>/);
+  assert.match(cii, /<ram:BuyerReference>/);
+
+  const pdf = billing.invoicePdf(invoice.id, { einvoiceXml: cii, persist: true });
+  const raw = pdf.buffer.toString('latin1');
+  assert.equal(pdf.buffer.subarray(0, 8).toString('latin1'), '%PDF-1.7');
+  assert.match(raw, /\/EmbeddedFile/);
+  assert.ok(raw.includes('CrossIndustryInvoice'), 'ZUGFeRD-XML ist im PDF eingebettet');
+
+  assert.equal(einvoice.xmlFilename(invoice, 'zugferd').endsWith('-zugferd.xml'), true);
+  assert.equal(einvoice.unitCode('m²'), 'MTK');
+});
+
+test('DMS archiviert Dokumente mit Versionen, Prüfsumme und GoBD-Löschung', () => {
+  const first = dms.storeDocument({
+    buffer: Buffer.from('Erste Fassung'),
+    originalName: 'vertrag.txt',
+    mime: 'text/plain',
+    title: 'Testvertrag',
+    category: 'vertrag',
+  });
+  assert.equal(first.version, 1);
+  assert.equal(first.sha256.length, 64);
+  assert.equal(dms.readDocument(first).toString(), 'Erste Fassung');
+
+  const second = dms.storeDocument({
+    buffer: Buffer.from('Zweite Fassung'),
+    originalName: 'vertrag.txt',
+    title: 'Testvertrag',
+    parentId: first.id,
+  });
+  assert.equal(second.version, 2);
+  const versions = dms.documentVersions(first.id);
+  assert.equal(versions.length, 2);
+  assert.equal(dms.documentEvents(second.id).some((event) => event.action === 'version'), true);
+
+  const deleted = dms.softDeleteDocument(first.id, 1);
+  assert.ok(deleted.deleted_at, 'Löschung ist nur eine Markierung');
+  assert.equal(dms.listDocuments({}).some((row) => row.id === first.id), false);
+  assert.equal(dms.listDocuments({ includeDeleted: true }).some((row) => row.id === first.id), true);
+  assert.throws(() => dms.storeDocument({ buffer: Buffer.from('<html><script>alert(1)</script>'), originalName: 'x.html' }), /Sicherheitsgründen/);
+});
+
+test('Kalkulation rechnet Vorgabe und Nachkalkulation, Preise werden übernommen', () => {
+  const row = db.prepare('SELECT order_id FROM order_items ORDER BY id LIMIT 1').get();
+  assert.ok(row, 'Ein Auftrag mit Positionen ist vorhanden');
+  const orderId = row.order_id;
+  const item = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id LIMIT 1').get(orderId);
+
+  const calculation = calc.updateCalculation(orderId, {
+    wage_rate: 48, overhead_pct: 10, profit_pct: 20, discount_pct: 5,
+    items: [{ id: item.id, cost_wage: 200, cost_material: 100 }],
+  });
+  assert.equal(calculation.config.wage_rate, 48);
+  assert.equal(calculation.config.overhead_pct, 10);
+  const line = calculation.items.find((entry) => entry.id === item.id);
+  assert.equal(line.costs.wage, 200);
+  assert.equal(line.costs.material, 100);
+  assert.ok(line.target > 0);
+  assert.ok(calculation.actual && typeof calculation.actual.margin_pct === 'number');
+  assert.ok(calculation.planned.cost_total >= 300);
+
+  const applied = calc.applyCalculation(orderId, { wage_rate: 48, overhead_pct: 10, profit_pct: 20, discount_pct: 5 });
+  const updated = applied.items.find((entry) => entry.id === item.id);
+  assert.ok(updated.unit_price > 0, 'Kalkulierter Preis wird in die Position geschrieben');
+});
+
+test('Personal: Urlaubsantrag, Resturlaub und Arbeitszeitkonto', () => {
+  const employee = db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY id LIMIT 1').get();
+  const absence = hr.createAbsence({
+    employee_id: employee.id,
+    type: 'urlaub',
+    start_date: '2026-12-21',
+    end_date: '2026-12-24',
+  }, 1);
+  assert.equal(absence.status, 'beantragt');
+  assert.equal(absence.days, 4, 'Wochenenden werden nicht mitgezählt');
+
+  hr.decideAbsence(absence.id, 'genehmigt', 1);
+  const account = hr.vacationAccount(employee.id, 2026);
+  assert.ok(account.approved >= 4);
+  assert.equal(account.remaining, account.entitled - account.approved);
+  assert.ok(hr.listAbsences({ year: 2026 }).some((row) => row.id === absence.id));
+
+  hr.createAdjustment({ employee_id: employee.id, date: '2026-11-20', minutes: 90, note: 'Nachtrag' }, 1);
+  const overtime = hr.overtimeAccount(employee.id, { from: '2026-11-16', to: '2026-11-22' });
+  assert.ok(Array.isArray(overtime.weeks));
+  assert.equal(overtime.weeks[0].adjustment, 90);
+  assert.equal(typeof overtime.balance_hours, 'number');
+  assert.ok(hr.hrOverview(2026).length >= 1);
+});
+
+test('Finanzen: Bankimport mit Duplikatfilter, DATEV, IBAN und SEPA', () => {
+  const invoice = db.prepare("SELECT * FROM invoices WHERE status IN ('offen','teilweise','gemahnt') ORDER BY id LIMIT 1").get();
+  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(invoice.customer_id);
+  const validIban = 'DE89370400440532013000';
+  assert.equal(finance.validIban(validIban), true);
+  assert.equal(finance.validIban('DE00370400440532013000'), false);
+
+  const csv = [
+    'Buchungstag;Betrag;Verwendungszweck;Auftraggeber;IBAN',
+    `03.05.2021;${Number(invoice.total).toFixed(2).replace('.', ',')};Rechnung ${invoice.number} ${customer.company || ''};Testkunde;${validIban}`,
+    '04.05.2021;-12,50;Material;Baumarkt;',
+  ].join('\n');
+  const imported = finance.importBankTransactions(csv, { filename: 'test.csv' });
+  assert.equal(imported.imported, 2);
+  const again = finance.importBankTransactions(csv, { filename: 'test.csv' });
+  assert.equal(again.imported, 0);
+  assert.equal(again.skipped, 2);
+
+  const rows = finance.listBankTransactions({});
+  const matched = rows.find((row) => row.date === '2021-05-03' && row.amount > 0);
+  assert.equal(matched.invoice_id, invoice.id, 'Zahlung wird über die Rechnungsnummer zugeordnet');
+
+  const datev = finance.datevExport({ from: '2021-01-01', to: '2021-12-31' });
+  assert.match(datev.content, /^\uFEFFEXTF;700;510;21;/);
+  assert.match(datev.content, /"Umsatz";"Soll\/Haben-Kennzeichen"/);
+
+  db.prepare('UPDATE customers SET iban = ?, bic = ? WHERE id = ?').run(validIban, 'COBADEFFXXX', customer.id);
+  db.prepare("UPDATE invoices SET status = 'offen', paid_total = 0 WHERE id = ?").run(invoice.id);
+  const sepa = finance.sepaExport({ invoiceIds: [invoice.id], executionDate: '2026-12-01' });
+  assert.equal(sepa.count, 1);
+  assert.match(sepa.content, /pain\.001\.001\.03/);
+  assert.match(sepa.content, /<IBAN>DE89370400440532013000<\/IBAN>/);
+});
+
+test('Aufmaß, Checklisten, Bautagebuch und Unterschrift', () => {
+  const row = db.prepare('SELECT order_id FROM order_items ORDER BY id LIMIT 1').get();
+  const orderId = row.order_id;
+
+  const measurement = site.createMeasurement(orderId, {
+    room: 'Bad', category: 'flaeche', description: 'Fliesen', length: 2.5, width: 2, count: 2,
+  }, 1);
+  assert.equal(measurement.quantity, 10);
+  const applied = site.applyMeasurements(orderId, { ids: [measurement.id], unitPrice: 45 });
+  assert.equal(applied.positions, 1);
+
+  const template = site.createChecklistTemplate({ name: 'Testvorlage', trade: 'Test', items: ['Punkt A', 'Punkt B'] });
+  const checklist = site.createOrderChecklist(orderId, { templateId: template.id }, 1);
+  assert.equal(checklist.items.length, 2);
+  site.updateChecklistEntry(checklist.id, checklist.items[0].id, { checked: true }, 1);
+  assert.equal(site.orderChecklists(orderId).find((list) => list.id === checklist.id).done, 1);
+  site.addChecklistEntry(checklist.id, 'Punkt C');
+  assert.equal(site.orderChecklists(orderId).find((list) => list.id === checklist.id).total, 3);
+
+  const diary = site.createDiaryEntry(orderId, { date: '2026-11-20', work_done: 'Rohre verlegt', weather: 'trocken' }, 1);
+  assert.equal(diary.work_done, 'Rohre verlegt');
+  assert.equal(site.listDiary(orderId).length >= 1, true);
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8z8Dwn4GBgYGJAQoAHgQCAZ7f2sQAAAAASUVORK5CYII=', 'base64');
+  const signature = site.saveSignature(orderId, {
+    customer_name: 'Max Mustermann',
+    dataUrl: `data:image/png;base64,${png.toString('base64')}`,
+  }, { userId: 1, ip: '127.0.0.1' });
+  assert.equal(signature.sha256.length, 64);
+  assert.ok(site.signatureFilePath(signature).endsWith('.png'));
+  assert.equal(site.siteSummary(orderId).signatures.length >= 1, true);
+  assert.throws(() => site.saveSignature(orderId, { customer_name: 'Test', dataUrl: 'data:text/plain;base64,QQ==' }), /PNG/);
+});
+
+test('Inventur zählt und korrigiert Bestände erst beim Abschluss', () => {
+  const article = db.prepare('SELECT * FROM articles WHERE active = 1 ORDER BY id LIMIT 1').get();
+  const session = inventory.createInventorySession({ name: 'Testinventur', userId: 1 });
+  assert.equal(session.status, 'offen');
+  const counted = Number(article.stock) - 2;
+  inventory.saveInventoryCount(session.id, { articleId: article.id, counted }, 1);
+  assert.equal(Number(db.prepare('SELECT stock FROM articles WHERE id = ?').get(article.id).stock), Number(article.stock),
+    'Bestand bleibt vor dem Abschluss unverändert');
+
+  const closed = inventory.closeInventorySession(session.id, 1);
+  assert.equal(closed.session.status, 'abgeschlossen');
+  assert.equal(Number(db.prepare('SELECT stock FROM articles WHERE id = ?').get(article.id).stock), counted);
+  assert.throws(() => inventory.saveInventoryCount(session.id, { articleId: article.id, counted: 1 }), /abgeschlossen/);
+  assert.throws(() => inventory.deleteInventorySession(session.id), /Nachvollziehbarkeit/);
+});
+
+test('Schnittstellen: GAEB, OCI und Webhook-Schutz', () => {
+  const row = db.prepare('SELECT order_id FROM order_items ORDER BY id LIMIT 1').get();
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
+  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY sort, id').all(order.id);
+
+  const gaeb = interfaces.exportGaeb(order, items);
+  assert.match(gaeb, /GAEB_DA_XML\/DA83/);
+  const parsed = interfaces.parseGaeb(gaeb);
+  assert.equal(parsed.items.length, items.length);
+  const importResult = interfaces.importGaebToOrder(order.id, gaeb);
+  assert.equal(importResult.count, items.length);
+
+  const oci = `<ORDER><ORDER_HEADER><ORDER_ID>OCI-1</ORDER_ID></ORDER_HEADER><ORDER_ITEM_LIST>
+    <ORDER_ITEM><LINE_ITEM_ID>1</LINE_ITEM_ID><QUANTITY>2</QUANTITY><ORDER_UNIT>Stk</ORDER_UNIT>
+    <PRICE>9.50</PRICE><DESCRIPTION_SHORT>OCI-Testartikel</DESCRIPTION_SHORT></ORDER_ITEM></ORDER_ITEM_LIST></ORDER>`;
+  const ociResult = interfaces.importOciToOrder(order.id, oci);
+  assert.equal(ociResult.count, 1);
+
+  assert.equal(interfaces.webhookUrlAllowed('https://example.com/hook').ok, true);
+  assert.equal(interfaces.webhookUrlAllowed('http://example.com/hook').ok, false);
+  assert.equal(interfaces.webhookUrlAllowed('https://127.0.0.1/hook').ok, false);
+  assert.equal(interfaces.webhookUrlAllowed('https://192.168.0.5/hook').ok, false);
+  assert.equal(interfaces.webhookUrlAllowed('https://user:pass@example.com/hook').ok, false);
+  assert.ok(interfaces.openapiDocument().paths['/api/finance/datev']);
+});
+
+test('Neue Module über HTTP inklusive Rechteprüfung', async () => {
+  const port = 3490;
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, PORT: String(port) },
+    stdio: 'ignore',
+  });
+  const base = `http://127.0.0.1:${port}`;
+  let ready = false;
+  for (let i = 0; i < 50 && !ready; i += 1) {
+    try { ready = (await fetch(`${base}/api/auth/meta`)).ok; } catch { await new Promise((resolve) => setTimeout(resolve, 150)); }
+  }
+  assert.ok(ready, 'Server ist erreichbar');
+
+  const credentials = {};
+  const login = async (username, password) => {
+    const candidates = [credentials[username], password, `${password}-test`].filter(Boolean);
+    let response = null;
+    for (const candidate of candidates) {
+      response = await fetch(`${base}/api/auth/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password: candidate }),
+      });
+      if (response.ok) break;
+    }
+    assert.equal(response.status, 200, `Login ${username}`);
+    let cookie = response.headers.get('set-cookie').split(';')[0];
+    let data = await response.json();
+    if (data.user.must_change_password) {
+      const next = `${candidates[candidates.length - 1]}-neu`;
+      const changed = await fetch(`${base}/api/auth/password`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ currentPassword: candidates[candidates.length - 1], newPassword: next }),
+      });
+      assert.equal(changed.status, 200, 'Startpasswort geändert');
+      cookie = changed.headers.get('set-cookie').split(';')[0];
+      credentials[username] = next;
+      data = await changed.json();
+    }
+    return { cookie, data };
+  };
+  const call = (cookie, path, options = {}) => fetch(`${base}${path}`, {
+    ...options,
+    headers: { ...(options.headers || {}), Cookie: cookie },
+  });
+  const json = (response) => response.json();
+  const post = (cookie, path, body) => call(cookie, path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  try {
+    const chef = await login('chef', 'chef123');
+    const order = db.prepare("SELECT * FROM orders WHERE doc_type = 'auftrag' ORDER BY id LIMIT 1").get();
+    const invoice = db.prepare("SELECT * FROM invoices WHERE status != 'storniert' ORDER BY id LIMIT 1").get();
+
+    const documents = await json(await call(chef.cookie, '/api/documents'));
+    assert.ok(Array.isArray(documents));
+    const overview = await json(await call(chef.cookie, '/api/finance/overview'));
+    assert.ok(overview.open_invoices);
+    assert.ok(Array.isArray(await json(await call(chef.cookie, '/api/finance/bank'))));
+    const datev = await call(chef.cookie, '/api/finance/datev?from=2021-01-01&to=2021-12-31');
+    assert.equal(datev.status, 200);
+    assert.match(await datev.text(), /EXTF;700/);
+
+    const board = await json(await call(chef.cookie, '/api/planning/board'));
+    assert.ok(Array.isArray(board.resources));
+    const accounts = await json(await call(chef.cookie, '/api/hr/accounts'));
+    assert.ok(Array.isArray(accounts.employees));
+    const calculation = await json(await call(chef.cookie, `/api/orders/${order.id}/calculation`));
+    assert.ok(calculation.planned && calculation.actual);
+    const siteData = await json(await call(chef.cookie, `/api/orders/${order.id}/site`));
+    assert.equal(typeof siteData.checklist_percent, 'number');
+    const templates = await json(await call(chef.cookie, '/api/checklist-templates'));
+    assert.ok(templates.length >= 3);
+    assert.ok(Array.isArray(await json(await call(chef.cookie, '/api/inventory'))));
+
+    const ubl = await call(chef.cookie, `/api/invoices/${invoice.id}/einvoice?format=xrechnung`);
+    assert.equal(ubl.status, 200);
+    assert.match(await ubl.text(), /xrechnung_3\.0/);
+    const zugferd = await call(chef.cookie, `/api/invoices/${invoice.id}/einvoice?format=zugferd&pdf=1`);
+    assert.equal(zugferd.status, 200);
+    const pdfBytes = Buffer.from(await zugferd.arrayBuffer());
+    assert.equal(pdfBytes.subarray(0, 8).toString('latin1'), '%PDF-1.7');
+    assert.ok(pdfBytes.toString('latin1').includes('EmbeddedFile'));
+
+    const uploaded = await json(await post(chef.cookie, '/api/documents', {
+      filename: 'http-test.txt', title: 'HTTP-Testdokument', category: 'vertrag', content: 'Inhalt', order_id: order.id,
+    }));
+    assert.equal(uploaded.sha256.length, 64);
+    const file = await call(chef.cookie, `/api/documents/${uploaded.id}/file`);
+    assert.equal(await file.text(), 'Inhalt');
+    const version = await json(await post(chef.cookie, `/api/documents/${uploaded.id}/versions`, { filename: 'v2.txt', content: 'Neu' }));
+    assert.equal(version.document.version, 2);
+
+    const draft = await json(await post(chef.cookie, '/api/assistant/draft', { kind: 'angebot', order_id: order.id }));
+    assert.match(draft.text, /Gesamtbetrag/);
+    const measurement = await json(await post(chef.cookie, `/api/orders/${order.id}/measurements`, {
+      room: 'Küche', category: 'flaeche', description: 'Fliesen', length: 2, width: 2, count: 1,
+    }));
+    assert.equal(measurement.quantity, 4);
+    assert.equal((await call(chef.cookie, `/api/orders/${order.id}/measurements/${measurement.id}`, { method: 'DELETE' })).status, 200);
+
+    const checklist = await json(await post(chef.cookie, `/api/orders/${order.id}/checklists`, { template_id: templates[0].id }));
+    assert.ok(checklist.items.length > 0);
+    const entry = await call(chef.cookie, `/api/checklists/${checklist.id}/entries/${checklist.items[0].id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ checked: 1 }),
+    });
+    assert.equal((await entry.json()).checked, 1);
+
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8z8Dwn4GBgYGJAQoAHgQCAZ7f2sQAAAAASUVORK5CYII=';
+    const signature = await json(await post(chef.cookie, `/api/orders/${order.id}/signatures`, {
+      customer_name: 'HTTP Kunde', dataUrl: `data:image/png;base64,${png}`,
+    }));
+    const signatureFile = await call(chef.cookie, `/api/signatures/${signature.id}/file`);
+    assert.equal(signatureFile.status, 200);
+
+    // ---------------------------------------------------------- Rechte
+    const monteur = await login('monteur', 'monteur123');
+    assert.equal((await call(monteur.cookie, '/api/documents')).status, 403);
+    assert.equal((await call(monteur.cookie, '/api/finance/overview')).status, 403);
+    assert.equal((await call(monteur.cookie, '/api/webhooks')).status, 403);
+    assert.equal((await post(monteur.cookie, '/api/inventory', { name: 'Verboten' })).status, 403);
+    assert.equal((await post(monteur.cookie, '/api/assistant/draft', { kind: 'angebot', order_id: order.id })).status, 403);
+    assert.equal((await post(monteur.cookie, `/api/orders/${order.id}/calculation/apply`, {})).status, 403);
+    const ownAccount = await json(await call(monteur.cookie, '/api/hr/accounts'));
+    assert.equal(ownAccount.employees, undefined, 'Monteure sehen keine fremden Personalkonten');
+    assert.ok(ownAccount.vacation);
+
+    const hrUser = await login('hr', 'hr123');
+    const hrAccounts = await json(await call(hrUser.cookie, '/api/hr/accounts'));
+    assert.ok(Array.isArray(hrAccounts.employees));
+    assert.equal((await call(hrUser.cookie, '/api/finance/overview')).status, 403);
+  } finally {
     child.kill();
   }
 });

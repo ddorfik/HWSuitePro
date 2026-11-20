@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-  <link rel="stylesheet" href="/styles.css?v=1.5.2" />
+  <link rel="stylesheet" href="/styles.css?v=1.6.0" />
 </head>
 <body>
   <div class="login-screen" id="login-screen" hidden>
@@ -102,6 +102,14 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8a4 4 0 0 1 4-4h9l3 3v9a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V8Z"/><path d="M8 12h8M8 16h5"/><path d="M15 4v4h4"/></svg>
           Wartungsverträge
         </a>
+        <a href="#/finance" data-route="finance" data-perm="finance.view">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h18v12H3z"/><path d="M3 10h18M7 15h4"/><path d="m16 3 3 4M8 3 5 7"/></svg>
+          Finanzen
+        </a>
+        <a href="#/documents" data-route="documents" data-perm="documents.view">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h6l2 2h8v14H4z"/><path d="M8 12h8M8 16h6"/></svg>
+          Dokumente
+        </a>
 
         <div class="nav-label">Team & Stammdaten</div>
         <a href="#/team" data-route="team" data-perm="employees.view">
@@ -131,7 +139,7 @@
           <span id="automation-info">Aufträge & Rechnungen werden automatisch erzeugt.</span>
           <button type="button" data-action="run-automation">Jetzt ausführen</button>
         </div>
-        <div class="app-version" id="app-version">Version 1.5.2</div>
+        <div class="app-version" id="app-version">Version 1.6.0</div>
       </div>
     </aside>
 
@@ -176,6 +184,6 @@
   <div id="modal-root"></div>
   <div id="toasts" aria-live="polite"></div>
 
-  <script type="module" src="/app.js?v=1.5.2"></script>
+  <script type="module" src="/app.js?v=1.6.0"></script>
 </body>
 </html>

@@ -2,8 +2,10 @@
 
 Branchenneutrale Handwerkersoftware für **Gas & Wasser, Elektro, Dach, SHK und alle weiteren Gewerke**:
 Kunden, Objekte, Aufträge, Angebote, Einsatzplanung, Materiallager, Wartungsverträge, Rechnungen und
-Mahnwesen – plus **Techniker-App mit Zeiterfassung, Baustellenfotos (Vorher/Nachher), Berichten und
-deutscher Sprachsteuerung**.
+Mahnwesen – inklusive **E-Rechnung (XRechnung/ZUGFeRD)**, **Dokumentenarchiv**, **Plantafel mit
+Ressourcen**, **Kalkulation**, **Urlaub-/Arbeitszeitkonten**, **DATEV/Bankabgleich/SEPA**, **Aufmaß,
+Unterschrift und Checklisten**, **Inventur** – plus **Techniker-App mit Zeiterfassung,
+Baustellenfotos (Vorher/Nachher), Berichten und deutscher Sprachsteuerung**.
 
 Läuft **komplett lokal** auf deinem Rechner oder Server. Keine Cloud, kein Abo, keine externen
 Laufzeitabhängigkeiten. Alle Daten liegen in einer SQLite-Datei, die du einfach kopieren kannst.
@@ -56,13 +58,20 @@ API-Aufruf** geprüft. Das Frontend blendet zusätzlich nicht erlaubte Bereiche 
 | Übersicht / Dashboard | ✓ | ✓ | ✓ | eigene | HR-Ansicht |
 | Aufträge | alle | alle | alle | **nur eigene** | – |
 | Preise / Rechnungen | ✓ | ✓ | ✓ | – | – |
+| E-Rechnung | ✓ | ✓ | ✓ | – | – |
+| Dokumente (DMS) | ✓ | ✓ | ✓ | – | – |
+| Finanzen (DATEV/Bank/SEPA) | ✓ | ✓ | ✓ | – | – |
+| Kalkulation | ✓ | ✓ | ✓ | – | – |
 | Kunden & Objekte | ✓ | ✓ | ✓ | eigene Kunden | – |
-| Planung | ✓ | ✓ | ✓ | eigene Termine | – |
+| Planung & Plantafel | ✓ | ✓ | ✓ | eigene Termine | – |
 | Lager | ✓ | ✓ | ✓ | nur Bestand | – |
+| Inventur | ✓ | ✓ | ✓ | – | – |
 | Berichte | alle | alle + Freigabe | alle | **nur eigene** | alle (lesen) |
 | Fotos | alle | alle | alle | eigene Aufträge | – |
 | Zeiten | alle | alle | alle | **nur eigene** | alle |
+| Urlaub & Arbeitszeit | ✓ | ✓ | Anträge lesen | **eigener Antrag** | ✓ |
 | Mitarbeiter | ✓ | ✓ | lesen | lesen | ✓ |
+| Textassistent | ✓ | ✓ | ✓ | – | ✓ |
 | Benutzerkonten | ✓ | – | – | – | – |
 | Einstellungen | ✓ | – | – | – | – |
 
@@ -172,6 +181,83 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 - Zahlungen erfassen (auch Teilzahlungen), offene Beträge, Überfälligkeiten
 - Mahnungen mit Mahnstufe und PDF, Storno, CSV-Export für die Buchhaltung
 
+### E-Rechnung: XRechnung & ZUGFeRD
+
+- **XRechnung 3.0** als UBL-2.1-XML und **ZUGFeRD 2.x** (EN 16931, Comfort) als CII-XML
+- **ZUGFeRD-PDF**: die Rechnung wird als PDF 1.7 mit eingebettetem CII-XML und XMP-Metadaten
+  erzeugt – direkt aus dem Rechnungsdialog herunterladbar
+- **Leitweg-ID / Buyer Reference** je Rechnung oder Kunde pflegbar; Rechnungsnummer als Fallback
+- Zahlungsart, Ansprechpartner, Fußtext und **§ 19 UStG (Kleinunternehmer)** in den Einstellungen
+- Status je Rechnung (`entwurf`, `erzeugt`, `versendet`), automatische PDF-Archivierung im DMS
+- Hinweis: Die Dateien sind bewusst konservativ aufgebaut, ersetzen aber **keine formale
+  Validierung** mit dem KoSIT-/ZUGFeRD-Prüftool und keine PDF/A-3-Zertifizierung.
+
+### Dokumentenarchiv (DMS, GoBD)
+
+- Ablage für PDF, Bilder, Office-Dateien, XML und CSV unter `data/ablage` (maximal 25 MB je Datei)
+- Kategorien (Rechnung, Angebot, Aufmaß, Vertrag, Eingangsrechnung, Steuer …), Kunde/Auftrag/
+  Rechnung als Verknüpfung
+- **Versionen** mit eigener Datei, SHA-256-Prüfsumme und lückenlosem Verlauf
+- **Soft-Delete**: Dateien verschwinden aus der aktiven Ablage, bleiben aber revisionssicher erhalten
+- Rechnungs-PDFs werden beim Erzeugen automatisch archiviert
+- Eigene Seiten `#/documents` und Projektakte im Auftrag; Zugriff nur mit `documents.view`
+
+### Kalkulation & Nachkalkulation
+
+- Vorgabewerte für **Lohn, Gemeinkosten, Gewinn und Rabatt** (global und je Auftrag)
+- Kosten je Position: Lohn, Material, Gerät und Sonstiges; Materialkosten werden aus dem
+  Artikel-Einkaufspreis vorbefüllt
+- **Zielpreis** je Position und Deckungsbeitrag auf Knopfdruck
+- **Nachkalkulation** aus tatsächlich gestempelter Zeit und Materialeinsatz inkl. Abweichung
+- „In Positionen übernehmen" schreibt die kalkulierten Verkaufspreise in das LV
+
+### Personal: Urlaub, Abwesenheiten & Arbeitszeit
+
+- Abwesenheiten: Urlaub, Krankheit, Schule/Ausbildung, Fortbildung, unbezahlt, Elternzeit, Sonstiges
+- Antrag durch Mitarbeiter, Genehmigung/Ablehnung durch HR/Chef, Wochenenden werden nicht gezählt
+- **Urlaubskonto** je Jahr mit Anspruch, genehmigten und beantragten Tagen sowie Resturlaub
+- **Arbeitszeitkonto** mit Wochenvergleich (Ist/Soll), Korrekturbuchungen und Saldo
+- Eigene Konten für Mitarbeiter, Gesamtübersicht für HR; Integriert in `#/team`
+
+### Finanzen: DATEV, Bankabgleich & SEPA
+
+- **Bankimport** aus CSV (gängige Spaltennamen) und **CAMT.053**; Duplikate werden übersprungen
+- Automatischer Abgleich über Rechnungsnummer oder passenden Betrag im Zeitfenster
+- Manuelle Zuordnung und Verbuchen als Zahlungseingang, inklusive Teilzahlungen
+- **DATEV-Buchungsstapel** im EXTF-Format 700 (Debitoren, Erlöse, Umsatzsteuer, Zahlungen);
+  Kontenrahmen und Berater-/Mandantennummer sind konfigurierbar
+- **SEPA-Überweisung** als `pain.001.001.03` mit IBAN-Prüfziffer, Vorschau und XML-Download
+- Eigene Seite `#/finance`; Bankdaten nur für Rollen mit Finanzrecht
+
+### Aufmaß, Unterschrift, Checklisten & Bautagebuch
+
+- **Aufmaß** mit Formeln für Fläche, Wand, Volumen, Länge und Stück, Raumzuordnung und Faktor
+- Übernahme der Aufmaßpositionen ins Leistungsverzeichnis (optional mit Raum im Text)
+- **Digitale Unterschrift** auf dem Touchscreen, als PNG mit SHA-256 gespeichert und am Auftrag
+  dokumentiert
+- **Checklistenvorlagen** (SHK-Wartung, Baustellenvorbereitung, Abnahme) und auftragsbezogene
+  Listen mit Fortschritt, Abhakten und Notizen
+- **Bautagebuch** mit Datum, Wetter, Personal, Arbeiten, Material und Besonderheiten
+- Alles gebündelt in der **Projektakte** des Auftrags
+
+### Inventur & Scan
+
+- Artikel per **GTIN, Barcode oder Artikelnummer** scannen und Bestand buchen
+- **Inventursitzungen** mit Zählungen je Artikel, Soll/Ist-Vergleich und Abweichungen
+- Erst der Abschluss bucht die Differenzen als Lagerkorrektur – abgeschlossene Inventuren
+  bleiben aus Nachvollziehbarkeitsgründen erhalten
+
+### Schnittstellen & Textassistent
+
+- **GAEB X83 (DA83)**: Export des Leistungsverzeichnisses und Import von Positionen
+- **OCI-Bestellung** (BMEcat/OCI-XML) vom Lieferanten direkt in den Auftrag übernehmen
+- **Webhooks**: signierte JSON-Ereignisse (`X-HandwerkPro-Signature`, HMAC-SHA256) für Aufträge,
+  Rechnungen, Zahlungen, Kunden, Dokumente und freigegebene Berichte. Nur HTTPS, private
+  Netzziele und Zugangsdaten in der URL sind gesperrt, Timeout 5 Sekunden
+- **OpenAPI 3.0** unter `/api/openapi.json` (Anmeldung erforderlich)
+- **Lokaler Textassistent**: Angebotstext, Zahlungserinnerung, Auftragszusammenfassung,
+  Checkliste und E-Mail – ausschließlich aus vorhandenen Daten, ohne externen KI-Dienst
+
 ### Kunden & Objekte
 
 - Firmen- und Privatkunden mit Ansprechpartner, Anrede, Kontaktdaten und Notizen
@@ -192,6 +278,8 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 ### Einsatzplanung / Kalender
 
 - Wochen- **und Monatsansicht**, farblich je Monteur, mit Filter-Chips nach Terminart
+- **Plantafel** als dritte Ansicht: Mitarbeiter, Abwesenheiten und Ressourcen (Fahrzeuge,
+  Werkzeuge, Maschinen) auf einen Blick – mit Kapazitätsprüfung und Konflikterkennung
 - **Terminarten**: Baustelle, Kundenbesuch, Meeting, Personal/HR, Notdienst, Fortbildung,
   Lieferant, Sonstiges
 - Termine per Klick in freie Zeitfenster anlegen; Kunde, Auftrag und Ort sind optional
@@ -275,7 +363,13 @@ WinAnsi-Kodierung für Umlaute und €). Sie enthalten:
 - Zahlungsinformationen inkl. IBAN/BIC und Zahlungsziel
 - Fußzeile mit Steuernummer, USt-IdNr., Handelsregister und Bankverbindung
 
-Erzeugte Rechnungs-PDFs werden zusätzlich unter `data/dokumente/` archiviert.
+Erzeugte Rechnungs-PDFs werden zusätzlich unter `data/dokumente/` archiviert und im
+Dokumentenarchiv (`data/ablage/`) geführt.
+
+Für **ZUGFeRD** wird dasselbe Layout als PDF 1.7 mit XMP-Metadaten und eingebetteter
+CII-XML-Datei erzeugt (`/api/invoices/:id/einvoice?format=zugferd&pdf=1`). Das ist bewusst
+kein zertifiziertes PDF/A-3; für eine förmliche E-Rechnung bitte mit dem KoSIT-/ZUGFeRD-
+Prüftool validieren.
 
 ---
 
@@ -381,8 +475,18 @@ GasWasserPro/
 │   ├── api.js              REST-API inkl. Auth- und Rechteprüfung
 │   ├── billing.js          Rechnungen, Zahlungen, Mahnungen, Lagerbuchungen
 │   ├── automation.js       Automatik (Verträge, Rechnungen, Mahnungen)
+│   ├── einvoice.js         XRechnung 3.0 (UBL) und ZUGFeRD 2.x (CII)
+│   ├── dms.js              Dokumentenarchiv, Versionen, GoBD-Verlauf
+│   ├── calc.js             Kalkulation und Nachkalkulation
+│   ├── resources.js        Plantafel und Ressourcenbuchungen
+│   ├── hr.js               Urlaub, Abwesenheiten und Arbeitszeitkonten
+│   ├── finance.js          Bankimport, DATEV und SEPA
+│   ├── site.js             Aufmaß, Checklisten, Bautagebuch, Unterschrift
+│   ├── inventory.js        Inventur und Artikel-Scan
+│   ├── interfaces.js       GAEB, OCI, Webhooks, OpenAPI
+│   ├── assistant.js        Lokaler Textassistent
 │   ├── documents.js        Layout von Rechnung, Mahnung, Auftrag, Angebot
-│   └── pdf.js              PDF-Generator ohne externe Bibliotheken
+│   └── pdf.js              PDF-Generator inkl. eingebetteter Dateien (ZUGFeRD)
 ├── public/
 │   ├── index.html          App-Gerüst, Login, Navigation
 │   ├── app.js              SPA-Logik, Techniker-App, Sprache, Berichte
@@ -443,6 +547,72 @@ GET    /api/invoices                  Rechnungen (Filter: status, q)
 POST   /api/invoices/:id/payments     Zahlung erfassen
 POST   /api/invoices/:id/dunning      Mahnung erzeugen
 GET    /api/invoices/:id/pdf          Rechnung als PDF (?mahnung=1 für Mahnung)
+GET    /api/invoices/:id/einvoice     E-Rechnung (?format=xrechnung|zugferd, &pdf=1 für ZUGFeRD-PDF)
+POST   /api/invoices/:id/einvoice/status   E-Rechnungsstatus setzen
+
+GET    /api/documents                 Dokumentenarchiv (Filter: customer_id, order_id, invoice_id, category, q)
+POST   /api/documents                 Dokument ablegen (Datei als `dataUrl`, `base64` oder `content`)
+GET    /api/documents/:id             Dokument mit Versionen und Verlauf
+GET    /api/documents/:id/file        Datei herunterladen
+POST   /api/documents/:id/versions    Neue Version ablegen
+DELETE /api/documents/:id             Soft-Delete (GoBD)
+
+GET    /api/orders/:id/calculation    Kalkulation und Nachkalkulation
+PUT    /api/orders/:id/calculation    Vorgaben und Kosten speichern
+POST   /api/orders/:id/calculation/apply   Kalkulierte Preise übernehmen
+GET    /api/orders/:id/measurements   Aufmaßpositionen
+POST   /api/orders/:id/measurements   Aufmaßposition anlegen
+POST   /api/orders/:id/measurements/apply   Aufmaß ins LV übernehmen
+GET    /api/orders/:id/signatures     Unterschriften
+POST   /api/orders/:id/signatures     Digitale Unterschrift (PNG als `dataUrl`)
+GET    /api/signatures/:id/file       Unterschrift anzeigen
+GET    /api/orders/:id/checklists     Checklisten und Vorlagen
+POST   /api/orders/:id/checklists     Checkliste aus Vorlage anlegen
+PUT    /api/checklists/:id/entries/:entryId   Punkt abhaken oder Notiz setzen
+GET    /api/orders/:id/diary          Bautagebuch
+POST   /api/orders/:id/diary          Tagebucheintrag anlegen
+GET    /api/orders/:id/site           Projektakte (Aufmaß, Listen, Unterschriften, Tagebuch)
+GET    /api/orders/:id/gaeb           GAEB-X83-Export
+POST   /api/orders/:id/gaeb/import    GAEB-Positionen importieren
+POST   /api/orders/:id/oci/import     OCI-Bestellung importieren
+
+GET    /api/planning/board            Plantafel (Mitarbeiter, Abwesenheiten, Buchungen)
+GET    /api/resources                 Ressourcen
+POST   /api/resources                 Ressource anlegen
+GET    /api/resource-bookings         Ressourcenbuchungen (Monteur: nur eigene)
+POST   /api/resource-bookings         Ressource einplanen (Konfliktprüfung)
+
+GET    /api/absences                  Abwesenheiten (eigene oder alle mit hr.manage)
+POST   /api/absences                  Urlaub/Abwesenheit beantragen
+POST   /api/absences/:id/decide       Genehmigen oder ablehnen
+GET    /api/hr/accounts               Urlaubs- und Arbeitszeitkonten
+GET    /api/hr/my-account             Eigenes Konto
+PUT    /api/vacation-entitlements     Urlaubsanspruch setzen
+GET    /api/time-adjustments          Arbeitszeit-Korrekturen
+POST   /api/time-adjustments          Korrektur buchen
+
+GET    /api/finance/overview          Finanzkennzahlen
+GET    /api/finance/bank              Bankumsätze
+POST   /api/finance/bank/import       CSV/CAMT.053 importieren
+POST   /api/finance/bank/auto-match   Automatischen Abgleich starten
+POST   /api/finance/bank/:id/book     Zahlung einer Rechnung zuordnen und verbuchen
+GET    /api/finance/datev             DATEV-Buchungsstapel (EXTF 700)
+GET    /api/finance/sepa              SEPA-Vorschau
+GET    /api/finance/sepa/file         SEPA-XML (pain.001.001.03)
+
+GET    /api/articles/lookup?code=…    Artikel per Scan-Code finden
+GET    /api/inventory                 Inventursitzungen
+POST   /api/inventory                 Inventur anlegen
+POST   /api/inventory/:id/count       Zählung speichern
+POST   /api/inventory/:id/close       Inventur abschließen und Bestand korrigieren
+
+GET    /api/checklist-templates       Checklistenvorlagen
+POST   /api/checklist-templates       Vorlage anlegen
+GET    /api/webhooks                  Webhooks (Einstellungen)
+POST   /api/webhooks                  Webhook anlegen
+POST   /api/webhooks/:id/test         Testzustellung
+GET    /api/openapi.json              OpenAPI-3.0-Dokument
+POST   /api/assistant/draft           Lokalen Textentwurf erzeugen
 
 GET    /api/customers                 Kunden inkl. Kennzahlen
 GET    /api/customers/:id             Kunde inkl. Objekten, Aufträgen, Rechnungen und Notizen

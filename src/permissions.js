@@ -50,6 +50,9 @@ const ROLE_PERMISSIONS = {
     'time.view.all', 'time.manage', 'time.own',
     'employees.view', 'employees.manage', 'employees.rates',
     'automation.run', 'exports.run',
+    'documents.view', 'documents.manage',
+    'finance.view', 'finance.manage',
+    'calculation.manage', 'resources.manage', 'assistant.use', 'hr.manage',
   ],
   buero: [
     'dashboard.view',
@@ -64,6 +67,9 @@ const ROLE_PERMISSIONS = {
     'time.view.all', 'time.manage', 'time.own',
     'employees.view',
     'automation.run', 'exports.run',
+    'documents.view', 'documents.manage',
+    'finance.view', 'finance.manage',
+    'calculation.manage', 'resources.manage', 'assistant.use',
   ],
   monteur: [
     'dashboard.view',
@@ -81,6 +87,7 @@ const ROLE_PERMISSIONS = {
     'employees.view', 'employees.manage', 'employees.rates',
     'time.view.all', 'time.manage', 'time.own',
     'reports.view.all',
+    'hr.manage', 'assistant.use',
   ],
 };
 
@@ -138,4 +145,12 @@ export const PERMISSION_LABELS = {
   'settings.manage': 'Einstellungen',
   'automation.run': 'Automatik',
   'exports.run': 'Exporte',
+  'documents.view': 'Dokumente sehen',
+  'documents.manage': 'Dokumente archivieren',
+  'finance.view': 'Finanzen sehen',
+  'finance.manage': 'Bank & SEPA',
+  'hr.manage': 'Urlaub & Arbeitszeit',
+  'calculation.manage': 'Kalkulation',
+  'resources.manage': 'Ressourcen planen',
+  'assistant.use': 'Textassistent',
 };

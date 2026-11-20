@@ -281,6 +281,14 @@ export function renderInvoicePdf(data) {
 
   if (!isDunning) closing(doc, y, settings);
   footer(doc, settings, `Seite ${doc.pages.length}`);
+  if (data.einvoiceXml) {
+    doc.attach({
+      name: `${String(invoice.number).replace(/[^A-Za-z0-9._-]+/g, '-')}-zugferd.xml`,
+      mime: 'text/xml',
+      data: data.einvoiceXml,
+      description: 'ZUGFeRD-Rechnungsdaten (CII)',
+    });
+  }
   return doc.build();
 }
 

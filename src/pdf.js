@@ -56,6 +56,43 @@ export function textWidth(text, size = 10, bold = false) {
   return bold ? width * 1.03 : width;
 }
 
+// PDF-Name für MIME-Typen: Sonderzeichen als #XX kodieren.
+function pdfName(value) {
+  return String(value || 'application/octet-stream').replace(/[^A-Za-z0-9._-]/g, (char) =>
+    `#${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
+}
+
+function pdfDate(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}` +
+    `${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`;
+}
+
+const xmpEscape = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+function xmpMetadata(doc) {
+  return `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/">
+      <pdfaid:part>3</pdfaid:part>
+      <pdfaid:conformance>B</pdfaid:conformance>
+    </rdf:Description>
+    <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <dc:title><rdf:Alt><rdf:li xml:lang="x-default">${xmpEscape(doc.title)}</rdf:li></rdf:Alt></dc:title>
+      <dc:creator><rdf:Seq><rdf:li>${xmpEscape(doc.author)}</rdf:li></rdf:Seq></dc:creator>
+    </rdf:Description>
+    <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+      <xmp:CreatorTool>HandwerkPro</xmp:CreatorTool>
+      <xmp:CreateDate>${new Date().toISOString()}</xmp:CreateDate>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>`;
+}
+
 export class PDF {
   constructor({ width = 595.28, height = 841.89, title = 'Dokument', author = '' } = {}) {
     this.width = width;
@@ -64,7 +101,14 @@ export class PDF {
     this.author = author;
     this.pages = [];
     this.current = null;
+    this.attachments = [];
     this.addPage();
+  }
+
+  /** Bettet eine Datei (z. B. ZUGFeRD-XML) in das PDF ein. */
+  attach({ name, mime = 'application/octet-stream', data, description = '' }) {
+    this.attachments.push({ name, mime, data, description });
+    return this;
   }
 
   addPage() {
@@ -184,10 +228,46 @@ export class PDF {
       pageIds.push(pageId);
     }
 
-    objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
+    // Eingebettete Dateien (ZUGFeRD) und XMP-Metadaten.
+    const filespecIds = [];
+    for (const attachment of this.attachments) {
+      const bytes = Buffer.isBuffer(attachment.data)
+        ? attachment.data
+        : Buffer.from(String(attachment.data ?? ''), 'utf8');
+      const stream = bytes.toString('latin1');
+      const embeddedId = addObject(
+        `<< /Type /EmbeddedFile /Subtype /${pdfName(attachment.mime)} /Length ${bytes.length} ` +
+        `/Params << /Size ${bytes.length} /ModDate (D:${pdfDate()}) >> >>\nstream\n${stream}\nendstream`
+      );
+      filespecIds.push(addObject(
+        `<< /Type /Filespec /F (${encode(attachment.name)}) /UF (${encode(attachment.name)}) ` +
+        `/Desc (${encode(attachment.description || attachment.name)}) /EF << /F ${embeddedId} 0 R >> >>`
+      ));
+    }
+
+    let namesId = null;
+    if (filespecIds.length) {
+      namesId = addObject(
+        `<< /EmbeddedFiles << /Names [${this.attachments
+          .map((attachment, index) => `(${encode(attachment.name)}) ${filespecIds[index]} 0 R`)
+          .join(' ')}] >> >>`
+      );
+    }
+
+    let metadataId = null;
+    if (this.attachments.length) {
+      metadataId = addObject(
+        `<< /Type /Metadata /Subtype /XML /Length ${Buffer.byteLength(xmpMetadata(this), 'utf8')} >>\n` +
+        `stream\n${xmpMetadata(this)}\nendstream`
+      );
+    }
+
+    objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R` +
+      `${namesId ? ` /Names ${namesId} 0 R /AF [${filespecIds.map((id) => `${id} 0 R`).join(' ')}]` : ''}` +
+      `${metadataId ? ` /Metadata ${metadataId} 0 R` : ''} >>`;
     objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`;
 
-    let pdf = '%PDF-1.4\n%\xE2\xE3\xCF\xD3\n';
+    let pdf = `${this.attachments.length ? '%PDF-1.7' : '%PDF-1.4'}\n%\xE2\xE3\xCF\xD3\n`;
     const offsets = [0];
     objects.forEach((body, index) => {
       offsets.push(Buffer.byteLength(pdf, 'latin1'));
