@@ -197,6 +197,12 @@ const api = {
       const error = new Error(message);
       error.status = response.status;
       if (data?.code) error.code = data.code;
+      // Tritt auf, wenn der Browser die neue App lädt, der Server aber noch mit
+      // altem Code läuft (z. B. nach einem Update ohne Neustart).
+      if (response.status === 404 && message === 'API-Endpunkt nicht gefunden') {
+        error.message = 'Server läuft mit einer älteren Version. Bitte den Server neu starten (npm start) und die Seite neu laden.';
+        error.code = 'server_outdated';
+      }
       if (response.status === 401 && !path.startsWith('/api/auth/login')) showLogin();
       throw error;
     }
