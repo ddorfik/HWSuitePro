@@ -261,3 +261,250 @@ export function createAdjustment(input = {}, userId = null) {
   ).run(employeeId, date, minutes, String(input.type || 'korrektur'), String(input.note || '').slice(0, 1000), userId).lastInsertRowid);
   return db.prepare('SELECT * FROM time_adjustments WHERE id = ?').get(id);
 }
+
+/* ------------------------------------------------------------------ Verträge */
+export const CONTRACT_KINDS = {
+  unbefristet: 'Unbefristet',
+  befristet: 'Befristet',
+  minijob: 'Minijob',
+  werkstudent: 'Werkstudent',
+  ausbildung: 'Ausbildung',
+  praktikum: 'Praktikum',
+};
+
+export function listContracts(employeeId = null) {
+  const clauses = [];
+  const values = [];
+  if (employeeId) { clauses.push('c.employee_id = ?'); values.push(Number(employeeId)); }
+  return db.prepare(
+    `SELECT c.*, e.name AS employee_name,
+       d.id AS document_ref, d.title AS document_title
+     FROM employment_contracts c
+     JOIN employees e ON e.id = c.employee_id
+     LEFT JOIN documents d ON d.id = c.document_id
+     ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+     ORDER BY e.name, c.start_date DESC, c.id DESC`
+  ).all(...values).map((row) => ({
+    ...row,
+    kind_label: CONTRACT_KINDS[row.kind] || row.kind,
+    current: !row.end_date || row.end_date >= todayISO(),
+  }));
+}
+
+export function createContract(input = {}) {
+  const employeeId = Number(input.employee_id);
+  if (!employeeId) throw new Error('Bitte einen Mitarbeiter auswählen');
+  if (!db.prepare('SELECT 1 FROM employees WHERE id = ?').get(employeeId)) throw new Error('Mitarbeiter nicht gefunden');
+  const start = isoDate(input.start_date) || todayISO();
+  const end = isoDate(input.end_date) || null;
+  if (end && end < start) throw new Error('Das Ende darf nicht vor dem Beginn liegen');
+  const kind = CONTRACT_KINDS[input.kind] ? input.kind : 'unbefristet';
+  const weekly = Number(input.weekly_hours ?? getSettings().hr_weekly_hours ?? 40);
+  if (!Number.isFinite(weekly) || weekly < 0 || weekly > 80) throw new Error('Bitte gültige Wochenstunden angeben');
+  const salary = Number(input.salary) || 0;
+  if (salary < 0) throw new Error('Das Gehalt darf nicht negativ sein');
+  const id = Number(db.prepare(
+    `INSERT INTO employment_contracts (employee_id, kind, start_date, end_date, weekly_hours, salary, notes, document_id)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).run(
+    employeeId, kind, start, end, weekly, Math.round(salary * 100) / 100,
+    String(input.notes || '').slice(0, 2000),
+    input.document_id ? Number(input.document_id) : null,
+  ).lastInsertRowid);
+  db.prepare('UPDATE employees SET weekly_hours = ? WHERE id = ?').run(weekly, employeeId);
+  return listContracts(employeeId).find((row) => row.id === id);
+}
+
+export function updateContract(id, input = {}) {
+  const row = db.prepare('SELECT * FROM employment_contracts WHERE id = ?').get(Number(id));
+  if (!row) throw new Error('Vertrag nicht gefunden');
+  const start = input.start_date !== undefined ? (isoDate(input.start_date) || row.start_date) : row.start_date;
+  const end = input.end_date !== undefined ? (isoDate(input.end_date) || null) : row.end_date;
+  if (end && end < start) throw new Error('Das Ende darf nicht vor dem Beginn liegen');
+  const weekly = input.weekly_hours !== undefined ? Number(input.weekly_hours) : row.weekly_hours;
+  if (!Number.isFinite(weekly) || weekly < 0 || weekly > 80) throw new Error('Bitte gültige Wochenstunden angeben');
+  db.prepare(
+    `UPDATE employment_contracts SET kind = ?, start_date = ?, end_date = ?, weekly_hours = ?, salary = ?,
+       notes = ?, document_id = ? WHERE id = ?`
+  ).run(
+    CONTRACT_KINDS[input.kind] ? input.kind : row.kind,
+    start,
+    end,
+    weekly,
+    input.salary !== undefined ? Math.max(0, Number(input.salary) || 0) : row.salary,
+    String(input.notes ?? row.notes).slice(0, 2000),
+    input.document_id !== undefined ? (input.document_id ? Number(input.document_id) : null) : row.document_id,
+    row.id,
+  );
+  db.prepare('UPDATE employees SET weekly_hours = ? WHERE id = ?').run(weekly, row.employee_id);
+  return listContracts(row.employee_id).find((entry) => entry.id === row.id);
+}
+
+export function deleteContract(id) {
+  db.prepare('DELETE FROM employment_contracts WHERE id = ?').run(Number(id));
+  return { ok: true };
+}
+
+/* ------------------------------------------------------------ Pausenautomatik */
+/** Zusätzliche Pause laut ArbZG, wenn die Automatik aktiviert ist. */
+export function autoBreakMinutes(workMinutes) {
+  const settings = getSettings();
+  if (String(settings.break_auto) !== '1') return 0;
+  const hours = Math.max(0, Number(workMinutes) || 0) / 60;
+  if (hours > 9) return Math.max(0, Math.round(Number(settings.break_after_9h) || 45));
+  if (hours > 6) return Math.max(0, Math.round(Number(settings.break_after_6h) || 30));
+  return 0;
+}
+
+/* ------------------------------------------------------------- Zeitkategorien */
+export function listTimeCategories({ includeInactive = false } = {}) {
+  return db.prepare(
+    `SELECT * FROM time_categories ${includeInactive ? '' : 'WHERE active = 1'} ORDER BY sort, id`
+  ).all();
+}
+
+export function createTimeCategory(input = {}) {
+  const label = String(input.label || '').trim();
+  if (!label) throw new Error('Bitte eine Bezeichnung angeben');
+  const key = String(input.key || label).toLowerCase()
+    .replace(/[äöüß]/g, (char) => ({ ä: 'ae', ö: 'oe', ü: 'ue', ß: 'ss' }[char]))
+    .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)
+    || `kategorie_${Date.now()}`;
+  if (db.prepare('SELECT 1 FROM time_categories WHERE key = ?').get(key)) {
+    throw new Error('Diese Kategorie existiert bereits');
+  }
+  const sort = Number(input.sort) || (Number(db.prepare('SELECT MAX(sort) AS s FROM time_categories').get().s) + 10);
+  const id = Number(db.prepare('INSERT INTO time_categories (key, label, active, sort) VALUES (?,?,?,?)')
+    .run(key, label.slice(0, 80), input.active === false ? 0 : 1, sort).lastInsertRowid);
+  return db.prepare('SELECT * FROM time_categories WHERE id = ?').get(id);
+}
+
+export function updateTimeCategory(id, input = {}) {
+  const row = db.prepare('SELECT * FROM time_categories WHERE id = ?').get(Number(id));
+  if (!row) throw new Error('Kategorie nicht gefunden');
+  db.prepare('UPDATE time_categories SET label = ?, active = ?, sort = ? WHERE id = ?').run(
+    String(input.label ?? row.label).trim().slice(0, 80) || row.label,
+    input.active !== undefined ? (input.active ? 1 : 0) : row.active,
+    input.sort !== undefined ? Number(input.sort) || 0 : row.sort,
+    row.id,
+  );
+  return db.prepare('SELECT * FROM time_categories WHERE id = ?').get(row.id);
+}
+
+export function deleteTimeCategory(id) {
+  const row = db.prepare('SELECT * FROM time_categories WHERE id = ?').get(Number(id));
+  if (!row) throw new Error('Kategorie nicht gefunden');
+  const used = db.prepare('SELECT COUNT(*) AS n FROM time_entries WHERE type = ?').get(row.key).n;
+  if (used) {
+    db.prepare('UPDATE time_categories SET active = 0 WHERE id = ?').run(row.id);
+    return { ok: true, deactivated: true, used };
+  }
+  db.prepare('DELETE FROM time_categories WHERE id = ?').run(row.id);
+  return { ok: true, deactivated: false };
+}
+
+/* -------------------------------------------------------- Lohnvorbereitung */
+const pad2 = (value) => String(value).padStart(2, '0');
+
+export function payrollMonth(year, month) {
+  const y = Number(year) || new Date().getFullYear();
+  const m = Math.min(12, Math.max(1, Number(month) || (new Date().getMonth() + 1)));
+  const from = `${y}-${pad2(m)}-01`;
+  const to = `${y}-${pad2(m)}-${pad2(new Date(y, m, 0).getDate())}`;
+  const employees = db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY name').all();
+  const rows = employees.map((employee) => {
+    const contract = db.prepare(
+      `SELECT * FROM employment_contracts
+       WHERE employee_id = ? AND (start_date IS NULL OR start_date <= ?)
+         AND (end_date IS NULL OR end_date >= ?)
+       ORDER BY start_date DESC, id DESC LIMIT 1`
+    ).get(employee.id, to, from);
+    const time = db.prepare(
+      `SELECT COALESCE(SUM((julianday(COALESCE(end_at, datetime('now'))) - julianday(start_at)) * 24 * 60), 0) AS minutes,
+         COALESCE(SUM(break_minutes), 0) AS break_minutes
+       FROM time_entries
+       WHERE employee_id = ? AND type = 'arbeit' AND date(start_at) BETWEEN date(?) AND date(?)`
+    ).get(employee.id, from, to);
+    const grossMinutes = Math.round(Number(time.minutes) || 0);
+    const explicitBreak = Math.round(Number(time.break_minutes) || 0);
+    const autoBreak = autoBreakMinutes(grossMinutes);
+    const breakMinutes = Math.max(explicitBreak, autoBreak);
+    const absences = db.prepare(
+      `SELECT type, COALESCE(SUM(days), 0) AS days FROM absences
+       WHERE employee_id = ? AND status = 'genehmigt' AND start_date <= ? AND end_date >= ?
+       GROUP BY type`
+    ).all(employee.id, to, from);
+    const vacationDays = Number(absences.find((row) => row.type === 'urlaub')?.days) || 0;
+    const sickDays = Number(absences.find((row) => row.type === 'krank')?.days) || 0;
+    const weeklyHours = Number(contract?.weekly_hours ?? employee.weekly_hours ?? getSettings().hr_weekly_hours ?? 40);
+    const targetMinutes = Math.round(weeklyHours * 60 * (workdays(from, to) / 5));
+    return {
+      employee_id: employee.id,
+      employee_name: employee.name,
+      role: employee.role,
+      contract_id: contract?.id ?? null,
+      contract_kind: contract ? (CONTRACT_KINDS[contract.kind] || contract.kind) : 'ohne Vertrag',
+      weekly_hours: Number(contract?.weekly_hours ?? employee.weekly_hours ?? 0),
+      salary: Number(contract?.salary ?? 0),
+      gross_minutes: grossMinutes,
+      break_minutes: breakMinutes,
+      auto_break_minutes: autoBreak,
+      net_minutes: Math.max(0, grossMinutes - breakMinutes),
+      net_hours: round2(Math.max(0, grossMinutes - breakMinutes) / 60),
+      target_minutes: targetMinutes,
+      diff_minutes: Math.max(0, grossMinutes - breakMinutes) - targetMinutes,
+      vacation_days: vacationDays,
+      sick_days: sickDays,
+    };
+  });
+  return {
+    year: y, month: m, from, to,
+    rows,
+    totals: {
+      employees: rows.length,
+      net_hours: round2(rows.reduce((sum, row) => sum + row.net_hours, 0)),
+      salary: round2(rows.reduce((sum, row) => sum + row.salary, 0)),
+      vacation_days: round2(rows.reduce((sum, row) => sum + row.vacation_days, 0)),
+      sick_days: round2(rows.reduce((sum, row) => sum + row.sick_days, 0)),
+    },
+  };
+}
+
+const csvCell = (value) => {
+  const text = String(value ?? '');
+  return /[";\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+export function payrollCsv(year, month) {
+  const data = payrollMonth(year, month);
+  const header = ['Mitarbeiter', 'Rolle', 'Vertrag', 'Wochenstunden', 'Gehalt', 'Brutto-Stunden', 'Pause', 'Netto-Stunden', 'Soll-Stunden', 'Differenz', 'Urlaubstage', 'Krankheitstage'];
+  const lines = [header.join(';')];
+  for (const row of data.rows) {
+    lines.push([
+      row.employee_name, row.role, row.contract_kind, row.weekly_hours, row.salary.toFixed(2),
+      (row.gross_minutes / 60).toFixed(2), (row.break_minutes / 60).toFixed(2), row.net_hours.toFixed(2),
+      (row.target_minutes / 60).toFixed(2), (row.diff_minutes / 60).toFixed(2),
+      row.vacation_days, row.sick_days,
+    ].map(csvCell).join(';'));
+  }
+  return {
+    filename: `Lohnvorbereitung-${data.year}-${pad2(data.month)}.csv`,
+    content: `\uFEFF${lines.join('\r\n')}\r\n`,
+    data,
+  };
+}
+
+/* ------------------------------------------------------------- Mutterschutz */
+/** Mutterschutzfristen aus dem voraussichtlichen Entbindungstermin. */
+export function maternityProtection(dueDate, { weeksBefore = 6, weeksAfter = 8 } = {}) {
+  const due = isoDate(dueDate);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(due)) throw new Error('Bitte einen gültigen Entbindungstermin angeben');
+  return {
+    due_date: due,
+    protection_start: addDays(due, -7 * weeksBefore),
+    protection_end: addDays(due, 7 * weeksAfter),
+    weeks_before: weeksBefore,
+    weeks_after: weeksAfter,
+    note: 'Bei Früh- oder Mehrlingsgeburten verlängert sich die Schutzfrist nach § 3 MuSchG.',
+  };
+}

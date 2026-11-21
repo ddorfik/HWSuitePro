@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { db, getSettings } from './db.js';
+import { buildOciOrder } from './warehouse.js';
 
 /* ------------------------------------------------------------------ GAEB */
 
@@ -182,6 +183,96 @@ export function importOciToOrder(orderId, text) {
   return { count: created, orderReference: parsed.orderReference };
 }
 
+/* --------------------------------------------------------- GAEB X84 / OCI */
+/** GAEB X84 (Kostenanschlag) – Positionen mit Mengen und Preisen. */
+export function exportGaebX84(order, items) {
+  const settings = getSettings();
+  const date = new Date().toISOString().slice(0, 10);
+  const positions = items.map((item, index) => {
+    const oz = `01.${String(index + 1).padStart(4, '0')}`;
+    return `        <Item RNoPart="${oz}">
+          <Description>
+            <CompleteText><DetailTx><TextOut><span>${xmlEscape(item.description)}</span></TextOut></DetailTx></CompleteText>
+          </Description>
+          <QU><Qty>${Number(item.quantity).toFixed(2)}</Qty><QU>${xmlEscape(GAEB_UNITS[item.unit] || item.unit || 'Stk')}</QU></QU>
+          <UP><UP>${Number(item.unit_price).toFixed(2)}</UP><Currency>EUR</Currency></UP>
+          <IT>${xmlEscape(item.kind === 'arbeit' ? 'Lohn' : 'Material')}</IT>
+        </Item>`;
+  }).join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<GAEB xmlns="http://www.gaeb.de/GAEB_DA_XML/DA84/3.2">
+  <GAEBInfo>
+    <Version>3.2</Version>
+    <Date>${date}</Date>
+    <ProgSystem>HandwerkPro</ProgSystem>
+  </GAEBInfo>
+  <Award>
+    <AwardInfo>
+      <Label><LabelText><span>${xmlEscape(order.title)}</span></LabelText></Label>
+      <Cur>EUR</Cur>
+    </AwardInfo>
+    <BoQ>
+      <BoQInfo>
+        <BoQName>${xmlEscape(order.number || 'Kostenanschlag')}</BoQName>
+        <BoQInfoText>${xmlEscape(settings.company_name)}</BoQInfoText>
+      </BoQInfo>
+      <BoQBody>
+        <BoQCtgy RNoPart="01">
+          <LblTx><DetailTx><TextOut><span>${xmlEscape(order.title)}</span></TextOut></DetailTx></LblTx>
+          <BoQBody>
+            <Itemlist>
+${positions}
+            </Itemlist>
+          </BoQBody>
+        </BoQCtgy>
+      </BoQBody>
+    </BoQ>
+  </Award>
+</GAEB>
+`;
+}
+
+/** OCI-Bestellung (OpenTrans 1.0) für Händler. */
+export function exportOci(order, items) {
+  return buildOciOrder(order, items);
+}
+
+/** Lexware-Buchhaltungsimport (CSV, Semikolon, Windows-1252-kompatibel). */
+export function lexwareExport({ from = '', to = '' } = {}) {
+  const clauses = ["i.status != 'storniert'"];
+  const values = [];
+  if (from) { clauses.push('date(i.date) >= date(?)'); values.push(from); }
+  if (to) { clauses.push('date(i.date) <= date(?)'); values.push(to); }
+  const rows = db.prepare(
+    `SELECT i.number, i.date, i.due_date, i.status, i.kind, i.subtotal, i.tax_total, i.total, i.paid_total,
+       c.number AS customer_number, c.company, c.first_name, c.last_name, c.email
+     FROM invoices i JOIN customers c ON c.id = i.customer_id
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY i.date, i.id`
+  ).all(...values);
+  const header = ['Belegnr', 'Belegdatum', 'Faelligkeit', 'Belegart', 'Kundennr', 'Kunde', 'Netto', 'USt', 'Brutto', 'Bezahlt', 'Offen', 'Status', 'E-Mail'];
+  const lines = [header.join(';')];
+  const cell = (value) => {
+    const text = String(value ?? '');
+    return /[";\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  const money = (value) => Number(value || 0).toFixed(2).replace('.', ',');
+  for (const row of rows) {
+    const name = row.company || `${row.first_name || ''} ${row.last_name || ''}`.trim();
+    lines.push([
+      row.number, row.date, row.due_date, row.kind === 'abschlag' ? 'Abschlag' : 'Rechnung',
+      row.customer_number, name, money(row.subtotal), money(row.tax_total), money(row.total),
+      money(row.paid_total), money(Number(row.total) - Number(row.paid_total)), row.status, row.email,
+    ].map(cell).join(';'));
+  }
+  const stamp = from || to ? `${from || 'start'}_${to || 'heute'}` : new Date().toISOString().slice(0, 10);
+  return {
+    filename: `Lexware-Export-${stamp}.csv`,
+    content: `\uFEFF${lines.join('\r\n')}\r\n`,
+    count: rows.length,
+  };
+}
+
 /* ------------------------------------------------------------------ Webhooks */
 
 export const WEBHOOK_EVENTS = {
@@ -320,7 +411,7 @@ export function openapiDocument(baseUrl = '') {
     openapi: '3.0.3',
     info: {
       title: 'HandwerkPro API',
-      version: '1.6.4',
+      version: '1.7.0',
       description: 'Interne REST-API. Anmeldung per Session-Cookie (hp_session). Alle Rechte werden serverseitig geprüft.',
     },
     servers: [{ url: baseUrl || '/' }],
@@ -368,6 +459,37 @@ export function openapiDocument(baseUrl = '') {
       '/api/finance/bank': { get: { summary: 'Bankumsätze', responses: { 200: { description: 'OK' } } } },
       '/api/finance/sepa': { get: { summary: 'SEPA pain.001', responses: { 200: { description: 'XML' } } } },
       '/api/webhooks': { get: { summary: 'Webhooks', responses: { 200: { description: 'OK' } } } },
+      '/api/tasks': {
+        get: { summary: 'Aufgaben', responses: { 200: { description: 'OK' } } },
+        post: { summary: 'Aufgabe anlegen', responses: { 200: { description: 'OK' } } },
+      },
+      '/api/messages': {
+        get: { summary: 'Nachrichten (optional je Auftrag)', responses: { 200: { description: 'OK' } } },
+        post: { summary: 'Nachricht senden', responses: { 200: { description: 'OK' } } },
+      },
+      '/api/notifications': { get: { summary: 'Benachrichtigungen', responses: { 200: { description: 'OK' } } } },
+      '/api/leads': {
+        get: { summary: 'Anfragen/Leads', responses: { 200: { description: 'OK' } } },
+        post: { summary: 'Anfrage anlegen', responses: { 200: { description: 'OK' } } },
+      },
+      '/api/leads/{id}/convert': { post: { summary: 'Anfrage in Kunde umwandeln', responses: { 200: { description: 'OK' } } } },
+      '/api/orders/{id}/progress-invoice': { post: { summary: 'Abschlagsrechnung', responses: { 200: { description: 'OK' } } } },
+      '/api/orders/{id}/oci': { get: { summary: 'OCI-Bestellung exportieren', responses: { 200: { description: 'XML' } } } },
+      '/api/orders/{id}/reservations': {
+        get: { summary: 'Materialreservierungen', responses: { 200: { description: 'OK' } } },
+        post: { summary: 'Material reservieren', responses: { 200: { description: 'OK' } } },
+      },
+      '/api/orders/{id}/packlist': { get: { summary: 'Packliste', responses: { 200: { description: 'OK' } } } },
+      '/api/employment-contracts': {
+        get: { summary: 'Arbeitsverträge', responses: { 200: { description: 'OK' } } },
+        post: { summary: 'Vertrag anlegen', responses: { 200: { description: 'OK' } } },
+      },
+      '/api/hr/payroll': { get: { summary: 'Lohnvorbereitung', responses: { 200: { description: 'OK' } } } },
+      '/api/hr/payroll.csv': { get: { summary: 'Lohnvorbereitung als CSV', responses: { 200: { description: 'CSV' } } } },
+      '/api/time-categories': { get: { summary: 'Zeitkategorien', responses: { 200: { description: 'OK' } } } },
+      '/api/finance/lexware': { get: { summary: 'Lexware-CSV-Export', responses: { 200: { description: 'CSV' } } } },
+      '/api/public/leads/{token}': { post: { summary: 'Öffentliche Anfrage (tokenisiert)', security: [], responses: { 200: { description: 'OK' } } } },
+      '/api/public/portal/{token}': { get: { summary: 'Kundenportal (tokenisiert)', security: [], responses: { 200: { description: 'OK' } } } },
     },
   };
   return doc;

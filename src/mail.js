@@ -140,38 +140,90 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => 
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[char]));
 
-function buildMessage({ from, fromName, to, subject, text, html }) {
+const cleanFilename = (value, fallback = 'datei') => {
+  const name = String(value || '')
+    .replace(/[\r\n"\\/]+/g, '_')
+    .replace(/[^\x20-\x7E]/g, '_')
+    .trim();
+  return name || fallback;
+};
+
+const encodeFilenameParam = (value) => encodeURIComponent(value)
+  .replace(/['()]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+
+/** Normalisiert Anhänge: { filename, content, contentType }. */
+function normalizeAttachments(attachments = []) {
+  return (Array.isArray(attachments) ? attachments : [])
+    .filter((entry) => entry && (entry.content != null || entry.buffer != null))
+    .map((entry) => {
+      const content = Buffer.isBuffer(entry.content)
+        ? entry.content
+        : Buffer.isBuffer(entry.buffer)
+          ? entry.buffer
+          : Buffer.from(entry.content ?? entry.buffer, typeof entry.content === 'string' ? 'utf8' : undefined);
+      return {
+        filename: cleanFilename(entry.filename || entry.name),
+        contentType: String(entry.contentType || entry.mime || 'application/octet-stream').split(';')[0].trim(),
+        content,
+      };
+    })
+    .filter((entry) => entry.content.length);
+}
+
+function buildMessage({ from, fromName, to, subject, text, html, attachments = [] }) {
   const boundary = `handwerkpro-${randomBytes(8).toString('hex')}`;
   const domain = from.split('@')[1] || 'handwerkpro.local';
-  const lines = [
+  const files = normalizeAttachments(attachments);
+  const alternativeBoundary = files.length ? `handwerkpro-alt-${randomBytes(8).toString('hex')}` : boundary;
+  const headers = [
     `From: ${fromName ? `${encodeHeader(fromName)} ` : ''}<${from}>`,
     `To: <${to}>`,
     `Subject: ${encodeHeader(subject)}`,
     `Date: ${new Date().toUTCString()}`,
     `Message-ID: <${randomBytes(10).toString('hex')}@${domain}>`,
     'MIME-Version: 1.0',
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    files.length
+      ? `Content-Type: multipart/mixed; boundary="${boundary}"`
+      : `Content-Type: multipart/alternative; boundary="${boundary}"`,
     '',
-    `--${boundary}`,
+  ];
+  const body = [];
+  if (files.length) {
+    body.push(`--${boundary}`, `Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`, '');
+  }
+  body.push(
+    `--${alternativeBoundary}`,
     'Content-Type: text/plain; charset=utf-8',
     'Content-Transfer-Encoding: base64',
     '',
     wrap76(Buffer.from(text, 'utf8').toString('base64')),
-    `--${boundary}`,
+    `--${alternativeBoundary}`,
     'Content-Type: text/html; charset=utf-8',
     'Content-Transfer-Encoding: base64',
     '',
     wrap76(Buffer.from(html, 'utf8').toString('base64')),
-    `--${boundary}--`,
+    `--${alternativeBoundary}--`,
     '',
-  ];
-  return lines.join('\r\n');
+  );
+  for (const file of files) {
+    body.push(
+      `--${boundary}`,
+      `Content-Type: ${file.contentType}; name="${file.filename}"`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; filename="${file.filename}"; filename*=UTF-8''${encodeFilenameParam(file.filename)}`,
+      '',
+      wrap76(file.content.toString('base64')),
+      '',
+    );
+  }
+  if (files.length) body.push(`--${boundary}--`, '');
+  return [...headers, ...body].join('\r\n');
 }
 
 /**
  * Verschickt eine E-Mail. Wirft bei Fehlern eine Error mit lesbarer Meldung.
  */
-export async function sendMail({ to, subject, text, html = '' }) {
+export async function sendMail({ to, subject, text, html = '', attachments = [] }) {
   const config = mailSettings();
   if (!config.host) throw new Error('E-Mail-Versand ist nicht eingerichtet (SMTP-Server fehlt)');
   if (!config.from) throw new Error('E-Mail-Versand ist nicht eingerichtet (Absenderadresse fehlt)');
@@ -232,6 +284,7 @@ export async function sendMail({ to, subject, text, html = '' }) {
       subject,
       text,
       html: html || `<pre style="font-family:inherit;white-space:pre-wrap">${escapeHtml(text)}</pre>`,
+      attachments,
     });
     await writeLine(socket, `${message.replace(/^\./gm, '..')}\r\n.`);
     await expectCode(reader, [250], 'die Nachricht');

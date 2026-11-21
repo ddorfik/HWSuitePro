@@ -6,7 +6,7 @@ import {
 import {
   createInvoiceFromOrder, invoicePdf, orderPdf, recordPayment, createDunning,
   recalcInvoice, loadInvoiceData, loadOrderData, adjustStock, invoiceStats,
-  nextDocumentNumber, orderTotals,
+  nextDocumentNumber, orderTotals, createProgressInvoice,
 } from './billing.js';
 import { runAutomation } from './automation.js';
 import {
@@ -41,7 +41,9 @@ import {
 import {
   ABSENCE_TYPES, ABSENCE_STATUS, listAbsences, createAbsence, decideAbsence, deleteAbsence,
   vacationAccount, setVacationEntitlement, overtimeAccount, hrOverview,
-  listAdjustments, createAdjustment,
+  listAdjustments, createAdjustment, CONTRACT_KINDS, listContracts, createContract,
+  updateContract, deleteContract, listTimeCategories, createTimeCategory, updateTimeCategory,
+  deleteTimeCategory, payrollMonth, payrollCsv, maternityProtection,
 } from './hr.js';
 import {
   parseBankFile, importBankTransactions, listBankTransactions, autoMatchTransactions,
@@ -58,12 +60,27 @@ import {
 import {
   exportGaeb, importGaebToOrder, importOciToOrder, listWebhooks, createWebhook,
   updateWebhook, deleteWebhook, webhookDeliveries, testWebhook, emitWebhook,
-  openapiDocument,
+  openapiDocument, exportGaebX84, exportOci, lexwareExport,
 } from './interfaces.js';
 import {
   lookupArticleByCode, listInventorySessions, createInventorySession, inventorySession,
   saveInventoryCount, closeInventorySession, deleteInventorySession,
 } from './inventory.js';
+import {
+  TASK_STATUS, TASK_PRIORITIES, listTasks, createTask, updateTask, setTaskDone, deleteTask,
+  listMessages, postMessage, listNotifications, unreadNotificationCount, markNotificationsRead,
+  activityFeed,
+} from './collab.js';
+import {
+  LEAD_SOURCES, leadStages, createLeadStage, updateLeadStage, deleteLeadStage,
+  listLeads, getLead, createLead, updateLead, deleteLead, convertLead, publicLeadIntake,
+  ensurePortalToken, revokePortalToken, portalData, portalPdfInvoice, portalMessage,
+  notifyAppointmentConfirmed,
+} from './crm.js';
+import {
+  listReservations, addReservation, updateReservation, deleteReservation, packlist,
+  sendDealerOrder, orderForTransfer,
+} from './warehouse.js';
 import { draftText } from './assistant.js';
 import {
   GEO_KINDS, geoStatus, updateGeoSettings, setHomeLocation, setOrderLocation, geoEvent, geoEvents,
@@ -1281,13 +1298,19 @@ route('GET', '/api/articles', (req, res, params, url) => {
   const low = url.searchParams.get('low') === '1';
   const rows = db.prepare(
     `SELECT a.*, ROUND(stock * purchase_price, 2) AS stock_value,
-       CASE WHEN stock <= min_stock THEN 1 ELSE 0 END AS low
+       CASE WHEN stock <= min_stock THEN 1 ELSE 0 END AS low,
+       (SELECT COALESCE(SUM(r.quantity), 0) FROM order_reservations r
+          WHERE r.article_id = a.id AND r.packed_at IS NULL) AS reserved
      FROM articles a
      WHERE (? = '%%' OR a.name LIKE ? OR a.number LIKE ? OR a.category LIKE ?
         OR a.gtin LIKE ? OR a.barcode LIKE ? OR a.manufacturer_number LIKE ?)
        ${low ? 'AND a.stock <= a.min_stock' : ''}
      ORDER BY a.category, a.name`
-  ).all(q, q, q, q, q, q, q);
+  ).all(q, q, q, q, q, q, q).map((row) => ({
+    ...row,
+    reserved: Number(row.reserved) || 0,
+    available: Math.round((Number(row.stock) - Number(row.reserved) + Number.EPSILON) * 1000) / 1000,
+  }));
   if (can(req.user, 'invoices.view')) return rows;
   return rows.map((row) => {
     const copy = { ...row };
@@ -1757,11 +1780,95 @@ route('POST', '/api/orders/:id/invoice', (req, res, params) => {
   return { invoice, pdf: `/api/invoices/${invoice.id}/pdf` };
 }, { permission: 'invoices.manage' });
 
-route('GET', '/api/orders/:id/pdf', (req, res, params) => {
-  const pdf = orderPdf(params.id);
+route('POST', '/api/orders/:id/progress-invoice', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const body = req.body ?? {};
+  const invoice = createProgressInvoice(order.id, {
+    percent: body.percent != null ? num(body.percent) : 0,
+    amount: body.amount != null && str(body.amount) !== '' ? num(body.amount) : null,
+    date: str(body.date) || todayISO(),
+    dueDays: body.dueDays != null ? num(body.dueDays) : null,
+    notes: str(body.notes),
+  });
+  emitWebhook('invoice.created', { id: invoice.id, number: invoice.number, total: invoice.total, order_id: invoice.order_id });
+  return { invoice, pdf: `/api/invoices/${invoice.id}/pdf` };
+}), { permission: 'invoices.manage' });
+
+/** PDF eines Auftragsdokuments (Auftragsbestätigung, Lieferschein …) per E-Mail versenden. */
+route('POST', '/api/orders/:id/send-document', async (req, res, params) => asApi(async () => {
+  const order = assertOrderAccess(req.user, params.id);
+  const { customer } = loadOrderData(order.id);
+  const to = str(req.body?.to) || str(customer?.email);
+  if (!to) throw new HttpError(400, 'Für diesen Kunden ist keine E-Mail-Adresse hinterlegt.');
+  const requested = str(req.body?.type) || 'auftragsbestaetigung';
+  const type = ['angebot', 'auftrag', 'auftragsbestaetigung', 'lieferschein'].includes(requested)
+    ? requested
+    : 'auftragsbestaetigung';
+  if (!mailConfigured()) {
+    throw new HttpError(400, 'E-Mail-Versand ist noch nicht eingerichtet. Bitte in den Einstellungen einen SMTP-Server hinterlegen.', 'mail_not_configured');
+  }
+  const pdf = orderPdf(order.id, type);
+  if (!pdf) throw new HttpError(404, 'Auftrag nicht gefunden');
+  const names = { angebot: 'Angebot', auftrag: 'Auftrag', auftragsbestaetigung: 'Auftragsbestätigung', lieferschein: 'Lieferschein' };
+  const subject = `${names[type]} ${order.number} – ${order.title}`;
+  const text = [
+    'Guten Tag,',
+    '',
+    `anbei erhalten Sie ${names[type] === 'Angebot' ? 'unser Angebot' : `unsere ${names[type]}`} ${order.number} zu „${order.title}“.`,
+    '',
+    'Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.',
+    '',
+    getSettings().company_name,
+  ].join('\n');
+  await sendMail({
+    to, subject, text,
+    attachments: [{ filename: pdf.filename, content: pdf.buffer, contentType: 'application/pdf' }],
+  });
+  logActivity('auftrag', `${names[type]} ${order.number} an ${to} gesendet.`);
+  return { sent: true, to, type };
+}), { permission: 'orders.manage' });
+
+route('POST', '/api/invoices/:id/send-mail', async (req, res, params) => asApi(async () => {
+  const data = loadInvoiceData(params.id);
+  if (!data) throw new HttpError(404, 'Rechnung nicht gefunden');
+  if (data.invoice.status === 'storniert') throw new HttpError(400, 'Stornierte Rechnungen werden nicht versendet');
+  const to = str(req.body?.to) || str(data.customer?.email);
+  if (!to) throw new HttpError(400, 'Für diesen Kunden ist keine E-Mail-Adresse hinterlegt.');
+  if (!mailConfigured()) {
+    throw new HttpError(400, 'E-Mail-Versand ist noch nicht eingerichtet. Bitte in den Einstellungen einen SMTP-Server hinterlegen.', 'mail_not_configured');
+  }
+  const pdf = invoicePdf(data.invoice.id, { persist: true });
+  const label = data.invoice.kind === 'abschlag' ? 'Abschlagsrechnung' : 'Rechnung';
+  const text = [
+    'Guten Tag,',
+    '',
+    `anbei erhalten Sie unsere ${label} ${data.invoice.number} über ${Number(data.invoice.total).toFixed(2).replace('.', ',')} €.`,
+    `Zahlbar bis zum ${deDateTime(data.invoice.due_date).split(',')[0]}.`,
+    '',
+    'Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.',
+    '',
+    getSettings().company_name,
+  ].join('\n');
+  await sendMail({
+    to,
+    subject: `${label} ${data.invoice.number}`,
+    text,
+    attachments: [{ filename: pdf.filename, content: pdf.buffer, contentType: 'application/pdf' }],
+  });
+  logActivity('rechnung', `${label} ${data.invoice.number} an ${to} gesendet.`);
+  return { sent: true, to };
+}), { permission: 'invoices.manage' });
+
+route('GET', '/api/orders/:id/pdf', (req, res, params, url) => {
+  const order = assertOrderAccess(req.user, params.id);
+  const requested = str(url.searchParams.get('type'));
+  const type = ['angebot', 'auftrag', 'auftragsbestaetigung', 'lieferschein'].includes(requested)
+    ? requested
+    : order.doc_type;
+  const pdf = orderPdf(order.id, type);
   if (!pdf) throw new HttpError(404, 'Auftrag nicht gefunden');
   return { __pdf: pdf.buffer, filename: pdf.filename };
-}, { permission: 'orders.view.all' });
+}, { permissions: ['orders.view.all', 'orders.view.own'] });
 
 // ----------------------------------------------------------------- Termine
 export const APPOINTMENT_KINDS = {
@@ -1928,6 +2035,7 @@ route('POST', '/api/public/appointments/:token/confirm', (req, res, params) => {
     WHERE id = ?`).run(appointment.id);
   logActivity('termin', `Kunde hat den Termin am ${deDateTime(appointment.start_at)} bestätigt.`);
   notifyReply(appointmentByToken(params.token), 'Termin bestätigt');
+  notifyAppointmentConfirmed(appointmentByToken(params.token));
   return publicAppointment(appointmentByToken(params.token));
 }, { public: true });
 
@@ -1940,6 +2048,7 @@ route('POST', '/api/public/appointments/:token/decline', (req, res, params) => {
     WHERE id = ?`).run(reply, appointment.id);
   logActivity('termin', `Kunde kann den Termin am ${deDateTime(appointment.start_at)} nicht wahrnehmen${reply ? `: „${reply}“` : ''}.`);
   notifyReply(appointmentByToken(params.token), 'Termin passt nicht');
+  notifyAppointmentConfirmed(appointmentByToken(params.token));
   return publicAppointment(appointmentByToken(params.token));
 }, { public: true });
 
@@ -2764,6 +2873,7 @@ function asApiListDocuments(req, url) {
     customerId: url.searchParams.get('customer_id'),
     orderId: url.searchParams.get('order_id'),
     invoiceId: url.searchParams.get('invoice_id'),
+    employeeId: url.searchParams.get('employee_id'),
     category: str(url.searchParams.get('category')),
     q: str(url.searchParams.get('q')),
     includeDeleted: url.searchParams.get('deleted') === '1' && can(req.user, 'settings.manage'),
@@ -2788,6 +2898,7 @@ route('POST', '/api/documents', (req) => asApi(() => {
     orderId: body.order_id ? num(body.order_id) : null,
     invoiceId: body.invoice_id ? num(body.invoice_id) : null,
     reportId: body.report_id ? num(body.report_id) : null,
+    employeeId: body.employee_id ? num(body.employee_id) : null,
     note: str(body.note),
     userId: req.user.id,
     parentId: body.parent_id ? num(body.parent_id) : null,
@@ -3038,6 +3149,16 @@ route('GET', '/api/finance/datev', (req, res, params, url) => asApi(() => {
   };
 }), { permission: 'finance.view' });
 
+route('GET', '/api/finance/lexware', (req, res, params, url) => asApi(() => {
+  const result = lexwareExport({ from: str(url.searchParams.get('from')), to: str(url.searchParams.get('to')) });
+  return {
+    __buffer: Buffer.from(result.content, 'utf8'),
+    mime: 'text/csv; charset=utf-8',
+    filename: result.filename,
+    disposition: 'attachment',
+  };
+}), { permission: 'finance.view' });
+
 route('GET', '/api/finance/bank', (req, res, params, url) => asApi(() => listBankTransactions({
   from: str(url.searchParams.get('from')),
   to: str(url.searchParams.get('to')),
@@ -3278,17 +3399,29 @@ route('DELETE', '/api/inventory/:id', (req, res, params) => asApi(() =>
   deleteInventorySession(params.id)), { permission: 'warehouse.manage' });
 
 // ----------------------------------------------------------------- GAEB / OCI
-route('GET', '/api/orders/:id/gaeb', (req, res, params) => asApi(() => {
+route('GET', '/api/orders/:id/gaeb', (req, res, params, url) => asApi(() => {
   const order = assertOrderAccess(req.user, params.id);
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY sort, id').all(order.id);
-  const xml = exportGaeb(order, items);
+  const x84 = str(url.searchParams.get('format')).toLowerCase() === 'x84';
+  const xml = x84 ? exportGaebX84(order, items) : exportGaeb(order, items);
   return {
     __buffer: Buffer.from(xml, 'utf8'),
     mime: 'application/xml; charset=utf-8',
-    filename: `${String(order.number || 'LV').replace(/[^A-Za-z0-9._-]+/g, '-')}.x83`,
+    filename: `${String(order.number || 'LV').replace(/[^A-Za-z0-9._-]+/g, '-')}.${x84 ? 'x84' : 'x83'}`,
     disposition: 'attachment',
   };
 }), { permissions: ['orders.view.all', 'orders.view.own'] });
+
+route('GET', '/api/orders/:id/oci', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const { items } = orderForTransfer(order.id);
+  return {
+    __buffer: Buffer.from(exportOci(order, items), 'utf8'),
+    mime: 'application/xml; charset=utf-8',
+    filename: `Bestellung-${String(order.number || order.id).replace(/[^A-Za-z0-9._-]+/g, '-')}.xml`,
+    disposition: 'attachment',
+  };
+}), { permissions: ['warehouse.view', 'orders.view.all', 'orders.view.own'] });
 
 route('POST', '/api/orders/:id/gaeb/import', (req, res, params) => asApi(() => {
   const order = assertOrderAccess(req.user, params.id);
@@ -3338,6 +3471,295 @@ route('POST', '/api/assistant/draft', (req) => asApi(() => {
     extra: str(body.extra),
   });
 }), { permission: 'assistant.use' });
+
+// ============================================================================
+// HERO-Parität: Zusammenarbeit, CRM, Kundenportal, Lager, Personal-Erweiterung
+// ============================================================================
+
+// ----------------------------------------------------------------- Aufgaben
+route('GET', '/api/tasks', (req, res, params, url) => asApi(() => ({
+  tasks: listTasks(req.user, {
+    status: str(url.searchParams.get('status')),
+    orderId: url.searchParams.get('order_id') || null,
+    employeeId: url.searchParams.get('employee_id') || null,
+  }),
+  statuses: TASK_STATUS,
+  priorities: TASK_PRIORITIES,
+  unread: unreadNotificationCount(req.user),
+})), { permission: 'tasks.view' });
+
+route('POST', '/api/tasks', (req) => asApi(() => {
+  const body = req.body ?? {};
+  if (body.order_id) assertOrderAccess(req.user, body.order_id);
+  return createTask(req.user, body);
+}), { permission: 'tasks.manage' });
+
+route('PUT', '/api/tasks/:id', (req, res, params) => asApi(() => {
+  const body = req.body ?? {};
+  if (body.order_id) assertOrderAccess(req.user, body.order_id);
+  return updateTask(req.user, params.id, body);
+}), { permission: 'tasks.manage' });
+
+route('POST', '/api/tasks/:id/done', (req, res, params) => asApi(() =>
+  setTaskDone(req.user, params.id, req.body?.done !== false)), { permission: 'tasks.complete' });
+
+route('DELETE', '/api/tasks/:id', (req, res, params) => asApi(() =>
+  deleteTask(req.user, params.id)), { permission: 'tasks.manage' });
+
+// --------------------------------------------------------------- Nachrichten
+route('GET', '/api/messages', (req, res, params, url) => asApi(() => {
+  const orderId = url.searchParams.get('order_id');
+  if (orderId) assertOrderAccess(req.user, orderId);
+  return {
+    messages: listMessages(req.user, { orderId: orderId || null, limit: url.searchParams.get('limit') || 50 }),
+    unread: unreadNotificationCount(req.user),
+  };
+}), { permission: 'messages.use' });
+
+route('POST', '/api/messages', (req) => asApi(() => {
+  const body = req.body ?? {};
+  if (body.order_id) assertOrderAccess(req.user, body.order_id);
+  return postMessage(req.user, { orderId: body.order_id || null, body: body.body });
+}), { permission: 'messages.use' });
+
+route('GET', '/api/notifications', (req, res, params, url) => asApi(() => ({
+  items: listNotifications(req.user, {
+    unreadOnly: url.searchParams.get('unread') === '1',
+    limit: url.searchParams.get('limit') || 30,
+  }),
+  unread: unreadNotificationCount(req.user),
+})), { authenticated: true });
+
+route('POST', '/api/notifications/read', (req) => asApi(() =>
+  markNotificationsRead(req.user, Array.isArray(req.body?.ids) ? req.body.ids : null)), { authenticated: true });
+
+route('GET', '/api/feed', (req, res, params, url) => asApi(() =>
+  ({ items: activityFeed(url.searchParams.get('limit') || 30) })), { authenticated: true });
+
+// --------------------------------------------------------------------- CRM
+route('GET', '/api/lead-stages', () => asApi(() => ({
+  stages: leadStages(),
+  sources: LEAD_SOURCES,
+})), { permission: 'leads.view' });
+
+route('POST', '/api/lead-stages', (req) => asApi(() =>
+  createLeadStage(req.body ?? {})), { permission: 'leads.manage' });
+route('PUT', '/api/lead-stages/:id', (req, res, params) => asApi(() =>
+  updateLeadStage(params.id, req.body ?? {})), { permission: 'leads.manage' });
+route('DELETE', '/api/lead-stages/:id', (req, res, params) => asApi(() =>
+  deleteLeadStage(params.id)), { permission: 'leads.manage' });
+
+route('GET', '/api/leads', (req, res, params, url) => asApi(() => ({
+  leads: listLeads({
+    stageId: url.searchParams.get('stage_id') || null,
+    q: str(url.searchParams.get('q')),
+    limit: Number(url.searchParams.get('limit')) || 200,
+  }),
+  stages: leadStages(),
+  sources: LEAD_SOURCES,
+})), { permission: 'leads.view' });
+
+route('GET', '/api/leads/:id', (req, res, params) => asApi(() => {
+  const lead = getLead(params.id);
+  if (!lead) throw new HttpError(404, 'Anfrage nicht gefunden');
+  return lead;
+}), { permission: 'leads.view' });
+
+route('POST', '/api/leads', (req) => asApi(() =>
+  createLead(req.body ?? {})), { permission: 'leads.manage' });
+route('PUT', '/api/leads/:id', (req, res, params) => asApi(() =>
+  updateLead(params.id, req.body ?? {})), { permission: 'leads.manage' });
+route('DELETE', '/api/leads/:id', (req, res, params) => asApi(() =>
+  deleteLead(params.id)), { permission: 'leads.manage' });
+
+route('POST', '/api/leads/:id/convert', (req, res, params) => asApi(() => {
+  const result = convertLead(params.id, req.user);
+  return result;
+}), { permission: 'leads.manage' });
+
+route('POST', '/api/leads/token', (req) => asApi(() => {
+  const current = str(getSettings().lead_token);
+  const token = current || randomBytes(24).toString('hex');
+  if (!current) setSettings({ lead_token: token });
+  return { token, path: `/anfrage/${token}` };
+}), { permission: 'leads.manage' });
+
+// -------------------------------------------------------------- Kundenportal
+route('POST', '/api/customers/:id/portal', (req, res, params) => asApi(() => {
+  const customer = assertCustomerAccess(req.user, params.id);
+  const token = ensurePortalToken(customer.id);
+  logActivity('portal', `Kundenportal-Link für ${customer.company || `${customer.first_name} ${customer.last_name}`.trim()} erstellt.`);
+  return { token, path: `/portal/${token}` };
+}), { permission: 'portal.manage' });
+
+route('DELETE', '/api/customers/:id/portal', (req, res, params) => asApi(() => {
+  const customer = assertCustomerAccess(req.user, params.id);
+  revokePortalToken(customer.id);
+  return { ok: true };
+}), { permission: 'portal.manage' });
+
+// ------------------------------------------------------------------- Lager
+route('GET', '/api/orders/:id/reservations', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return { reservations: listReservations(order.id) };
+}), { permission: 'warehouse.view' });
+
+route('POST', '/api/orders/:id/reservations', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return { reservations: addReservation(req.user, order.id, req.body ?? {}) };
+}), { permission: 'warehouse.manage' });
+
+route('PUT', '/api/reservations/:id', (req, res, params) => asApi(() => {
+  const row = db.prepare('SELECT * FROM order_reservations WHERE id = ?').get(num(params.id));
+  if (!row) throw new HttpError(404, 'Reservierung nicht gefunden');
+  assertOrderAccess(req.user, row.order_id);
+  return { reservations: updateReservation(row.id, req.body ?? {}) };
+}), { permission: 'warehouse.manage' });
+
+route('DELETE', '/api/reservations/:id', (req, res, params) => asApi(() => {
+  const row = db.prepare('SELECT * FROM order_reservations WHERE id = ?').get(num(params.id));
+  if (!row) throw new HttpError(404, 'Reservierung nicht gefunden');
+  assertOrderAccess(req.user, row.order_id);
+  return { reservations: deleteReservation(row.id) };
+}), { permission: 'warehouse.manage' });
+
+route('GET', '/api/orders/:id/packlist', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  return packlist(order.id);
+}), { permission: 'warehouse.view' });
+
+route('POST', '/api/orders/:id/dealer-order', (req, res, params) => asApi(async () => {
+  const order = assertOrderAccess(req.user, params.id);
+  return sendDealerOrder(req.user, order.id);
+}), { permission: 'warehouse.manage' });
+
+// --------------------------------------------------- Personal-Erweiterung
+route('GET', '/api/employment-contracts', (req, res, params, url) => asApi(() => ({
+  contracts: listContracts(url.searchParams.get('employee_id') || null),
+  kinds: CONTRACT_KINDS,
+})), { permissions: ['hr.manage', 'hr.payroll'] });
+
+route('POST', '/api/employment-contracts', (req) => asApi(() =>
+  createContract(req.body ?? {})), { permission: 'hr.manage' });
+route('PUT', '/api/employment-contracts/:id', (req, res, params) => asApi(() =>
+  updateContract(params.id, req.body ?? {})), { permission: 'hr.manage' });
+route('DELETE', '/api/employment-contracts/:id', (req, res, params) => asApi(() =>
+  deleteContract(params.id)), { permission: 'hr.manage' });
+
+route('GET', '/api/time-categories', (req, res, params, url) => asApi(() => ({
+  categories: listTimeCategories({
+    includeInactive: url.searchParams.get('all') === '1' && can(req.user, 'hr.manage'),
+  }),
+})), { authenticated: true });
+
+route('POST', '/api/time-categories', (req) => asApi(() =>
+  createTimeCategory(req.body ?? {})), { permission: 'hr.manage' });
+route('PUT', '/api/time-categories/:id', (req, res, params) => asApi(() =>
+  updateTimeCategory(params.id, req.body ?? {})), { permission: 'hr.manage' });
+route('DELETE', '/api/time-categories/:id', (req, res, params) => asApi(() =>
+  deleteTimeCategory(params.id)), { permission: 'hr.manage' });
+
+route('GET', '/api/hr/payroll', (req, res, params, url) => asApi(() => {
+  const now = new Date();
+  return payrollMonth(
+    url.searchParams.get('year') || now.getFullYear(),
+    url.searchParams.get('month') || now.getMonth() + 1,
+  );
+}), { permission: 'hr.payroll' });
+
+route('GET', '/api/hr/payroll.csv', (req, res, params, url) => asApi(() => {
+  const now = new Date();
+  const result = payrollCsv(
+    url.searchParams.get('year') || now.getFullYear(),
+    url.searchParams.get('month') || now.getMonth() + 1,
+  );
+  return {
+    __buffer: Buffer.from(result.content, 'utf8'),
+    mime: 'text/csv; charset=utf-8',
+    filename: result.filename,
+    disposition: 'attachment',
+  };
+}), { permission: 'hr.payroll' });
+
+route('GET', '/api/hr/maternity', (req, res, params, url) => asApi(() =>
+  maternityProtection(url.searchParams.get('due_date'), {
+    weeksBefore: num(url.searchParams.get('weeks_before')) || 6,
+    weeksAfter: num(url.searchParams.get('weeks_after')) || 8,
+  })), { permission: 'hr.manage' });
+
+route('GET', '/api/employees/:id/file', (req, res, params, url) => asApi(() => {
+  const employeeId = num(params.id);
+  const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
+  if (!employee) throw new HttpError(404, 'Mitarbeiter nicht gefunden');
+  const self = req.user.employee_id === employeeId;
+  if (!self && !can(req.user, 'hr.manage')) throw new HttpError(403, 'Personalakte nur für HR und die eigene Person');
+  const year = Number(url.searchParams.get('year')) || new Date().getFullYear();
+  return {
+    employee: can(req.user, 'hr.manage') ? employee : sanitizeEmployee(employee),
+    contracts: can(req.user, 'hr.manage') ? listContracts(employeeId) : [],
+    documents: listDocuments({ employeeId }),
+    absences: listAbsences({ employeeId, year }),
+    vacation: vacationAccount(employeeId, year),
+    overtime: overtimeAccount(employeeId, {
+      from: `${year}-01-01`,
+      to: `${year}-12-31` > todayISO() ? todayISO() : `${year}-12-31`,
+    }),
+  };
+}), { permissions: ['hr.manage', 'time.own'] });
+
+// ---------------------------------------------------- Öffentliche Seiten
+route('POST', '/api/public/leads/:token', (req, res, params) => {
+  publicRateLimit(req, 'lead-write', 10, 60_000);
+  return asApi(() => publicLeadIntake(params.token, req.body ?? {}));
+}, { public: true });
+
+route('GET', '/api/public/portal/:token', (req, res, params) => {
+  publicRateLimit(req, 'portal-read', 90, 60_000);
+  const data = portalData(params.token);
+  if (!data) throw new HttpError(404, 'Dieser Portal-Link ist ungültig oder wurde zurückgezogen');
+  return data;
+}, { public: true });
+
+route('GET', '/api/public/portal/:token/invoices/:invoiceId/pdf', (req, res, params) => {
+  publicRateLimit(req, 'portal-read', 90, 60_000);
+  const invoice = portalPdfInvoice(params.token, params.invoiceId);
+  if (!invoice) throw new HttpError(404, 'Rechnung nicht gefunden');
+  const pdf = invoicePdf(invoice.id);
+  if (!pdf) throw new HttpError(404, 'Rechnung nicht gefunden');
+  return { __pdf: pdf.buffer, filename: pdf.filename };
+}, { public: true });
+
+route('GET', '/api/public/portal/:token/documents/:documentId/file', (req, res, params) => {
+  publicRateLimit(req, 'portal-read', 90, 60_000);
+  const visible = portalData(params.token);
+  if (!visible) throw new HttpError(404, 'Dieser Portal-Link ist ungültig');
+  const row = documentRow(params.documentId);
+  const ownerOrder = row?.order_id
+    ? db.prepare('SELECT customer_id FROM orders WHERE id = ?').get(row.order_id)
+    : null;
+  const allowed = row && !row.deleted_at && (Number(row.customer_id) === Number(visible.customer.id)
+    || Number(ownerOrder?.customer_id) === Number(visible.customer.id));
+  if (!allowed) {
+    throw new HttpError(404, 'Dokument nicht gefunden');
+  }
+  const path = documentFilePath(row);
+  if (!path) throw new HttpError(404, 'Datei nicht gefunden');
+  return {
+    __file: path,
+    mime: row.mime || 'application/octet-stream',
+    filename: row.original_name || row.title,
+    disposition: 'attachment',
+  };
+}, { public: true });
+
+route('POST', '/api/public/portal/:token/messages', (req, res, params) => {
+  publicRateLimit(req, 'portal-write', 20, 60_000);
+  return asApi(() => {
+    const result = portalMessage(params.token, req.body ?? {});
+    if (!result) throw new HttpError(404, 'Dieser Portal-Link ist ungültig');
+    return result;
+  });
+}, { public: true });
 
 // ----------------------------------------------------------------- Router
 export async function handleApi(req, res, url) {

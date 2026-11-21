@@ -2,6 +2,7 @@ import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, normalize as normalizePath, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { db, DATA_DIR } from './db.js';
+import { autoBreakMinutes } from './hr.js';
 
 const PHOTO_DIR = join(DATA_DIR, 'fotos');
 
@@ -246,5 +247,19 @@ export function stopTime(user, { note = '' } = {}) {
   const minutes = Math.max(0, Math.round(
     (new Date(entry.end_at.replace(' ', 'T') + 'Z') - new Date(entry.start_at.replace(' ', 'T') + 'Z')) / 60000
   ));
-  return { ...entry, minutes };
+  // Pausenautomatik: gesetzliche Pause einmalig beim Stoppen festschreiben.
+  if (entry.type === 'arbeit' && !Number(entry.break_minutes)) {
+    const pause = autoBreakMinutes(minutes);
+    if (pause > 0) {
+      db.prepare('UPDATE time_entries SET break_minutes = ? WHERE id = ?').run(pause, entry.id);
+      entry.break_minutes = pause;
+    }
+  }
+  const breakMinutes = Number(entry.break_minutes) || 0;
+  return {
+    ...entry,
+    minutes,
+    break_minutes: breakMinutes,
+    net_minutes: Math.max(0, minutes - breakMinutes),
+  };
 }

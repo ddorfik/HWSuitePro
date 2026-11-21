@@ -12,11 +12,14 @@ export const DOCUMENT_CATEGORIES = {
   rechnung: 'Rechnung',
   angebot: 'Angebot',
   auftrag: 'Auftrag',
+  auftragsbestaetigung: 'Auftragsbestätigung',
+  lieferschein: 'Lieferschein',
   aufmass: 'Aufmaß',
   foto: 'Foto',
   protokoll: 'Protokoll',
   vertrag: 'Vertrag',
-  lieferschein: 'Lieferschein',
+  personal: 'Personalakte',
+  lohn: 'Lohn / Gehalt',
   eingangsrechnung: 'Eingangsrechnung',
   steuer: 'Steuer / Buchhaltung',
   sonstiges: 'Sonstiges',
@@ -64,7 +67,7 @@ export function logDocumentEvent(documentId, userId, action, detail = '', ip = '
 
 export function storeDocument({
   buffer, originalName = '', mime = '', title = '', category = 'sonstiges',
-  customerId = null, orderId = null, invoiceId = null, reportId = null,
+  customerId = null, orderId = null, invoiceId = null, reportId = null, employeeId = null,
   note = '', userId = null, parentId = null, ip = '',
 }) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('Die Datei ist leer');
@@ -91,14 +94,15 @@ export function storeDocument({
   const sha256 = createHash('sha256').update(buffer).digest('hex');
 
   const id = Number(db.prepare(
-    `INSERT INTO documents (customer_id, order_id, invoice_id, report_id, category, title, filename,
+    `INSERT INTO documents (customer_id, order_id, invoice_id, report_id, employee_id, category, title, filename,
        original_name, mime, size, sha256, version, parent_id, note, created_by)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     customerId ? Number(customerId) : null,
     orderId ? Number(orderId) : null,
     invoiceId ? Number(invoiceId) : null,
     reportId ? Number(reportId) : null,
+    employeeId ? Number(employeeId) : null,
     DOCUMENT_CATEGORIES[category] ? category : 'sonstiges',
     String(title || originalName || 'Dokument').slice(0, 300),
     filename,
@@ -144,26 +148,28 @@ export function documentFilePath(row) {
   return existsSync(target) ? target : null;
 }
 
-export function listDocuments({ customerId = null, orderId = null, invoiceId = null, category = '', q = '', includeDeleted = false } = {}) {
+export function listDocuments({ customerId = null, orderId = null, invoiceId = null, employeeId = null, category = '', q = '', includeDeleted = false } = {}) {
   const clauses = [];
   const values = [];
   if (!includeDeleted) clauses.push('d.deleted_at IS NULL');
   if (customerId) { clauses.push('d.customer_id = ?'); values.push(Number(customerId)); }
   if (orderId) { clauses.push('d.order_id = ?'); values.push(Number(orderId)); }
   if (invoiceId) { clauses.push('d.invoice_id = ?'); values.push(Number(invoiceId)); }
+  if (employeeId) { clauses.push('d.employee_id = ?'); values.push(Number(employeeId)); }
   if (category) { clauses.push('d.category = ?'); values.push(String(category)); }
   const needle = `%${String(q || '').trim()}%`;
   if (q) {
-    clauses.push('(d.title LIKE ? OR d.original_name LIKE ? OR d.note LIKE ? OR c.company LIKE ? OR c.last_name LIKE ? OR o.number LIKE ?)');
-    values.push(needle, needle, needle, needle, needle, needle);
+    clauses.push('(d.title LIKE ? OR d.original_name LIKE ? OR d.note LIKE ? OR c.company LIKE ? OR c.last_name LIKE ? OR o.number LIKE ? OR e.name LIKE ?)');
+    values.push(needle, needle, needle, needle, needle, needle, needle);
   }
   return db.prepare(
     `SELECT d.*, c.company, c.first_name, c.last_name, o.number AS order_number,
-       i.number AS invoice_number, u.name AS user_name
+       i.number AS invoice_number, e.name AS employee_name, u.name AS user_name
      FROM documents d
      LEFT JOIN customers c ON c.id = d.customer_id
      LEFT JOIN orders o ON o.id = d.order_id
      LEFT JOIN invoices i ON i.id = d.invoice_id
+     LEFT JOIN employees e ON e.id = d.employee_id
      LEFT JOIN users u ON u.id = d.created_by
      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
      ORDER BY d.created_at DESC, d.id DESC LIMIT 500`

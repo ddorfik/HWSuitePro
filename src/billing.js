@@ -97,16 +97,32 @@ export function createInvoiceFromOrder(orderId, { date = todayISO(), dueDays = n
   const { order, items, customer } = data;
   if (order.doc_type === 'angebot') throw new Error('Angebote müssen zuerst in einen Auftrag umgewandelt werden');
   if (order.status === 'storniert') throw new Error('Stornierte Aufträge können nicht abgerechnet werden');
-  const existing = db.prepare('SELECT id, number FROM invoices WHERE order_id = ?').get(orderId);
+  const existing = db.prepare(
+    "SELECT id, number FROM invoices WHERE order_id = ? AND kind != 'abschlag' AND status != 'storniert'"
+  ).get(orderId);
   if (existing) throw new Error(`Für diesen Auftrag existiert bereits die Rechnung ${existing.number}`);
+  const advances = db.prepare(
+    "SELECT * FROM invoices WHERE order_id = ? AND kind = 'abschlag' AND status != 'storniert' ORDER BY id"
+  ).all(orderId);
 
   const positions = items.length
-    ? items
+    ? items.map((item) => ({ ...item }))
     : order.labor_hours > 0
       ? [{ kind: 'arbeit', description: 'Ausgeführte Arbeiten', quantity: order.labor_hours, unit: 'Std', unit_price: order.labor_rate }]
       : [];
 
   if (!positions.length) throw new Error('Der Auftrag hat keine abrechenbaren Positionen');
+
+  // Bereits gestellte Abschläge werden in der Schlussrechnung abgezogen.
+  for (const advance of advances) {
+    positions.push({
+      kind: 'abschlag',
+      description: `abzüglich Abschlagsrechnung ${advance.number}${advance.percent ? ` (${advance.percent} %)` : ''}`,
+      quantity: 1,
+      unit: 'Psch',
+      unit_price: -Number(advance.subtotal || 0),
+    });
+  }
 
   const settings = getSettings();
   const taxRate = Number(order.tax_rate) || Number(settings.default_tax_rate);
@@ -120,8 +136,8 @@ export function createInvoiceFromOrder(orderId, { date = todayISO(), dueDays = n
   try {
     invoiceId = Number(db.prepare(
       `INSERT INTO invoices (number, order_id, customer_id, property_id, date, due_date, service_date, status, tax_rate,
-         subtotal, tax_total, total, notes, buyer_reference)
-       VALUES (?,?,?,?,?,?,?,'offen',?,?,?,?,?,?)`
+         subtotal, tax_total, total, notes, buyer_reference, kind)
+       VALUES (?,?,?,?,?,?,?,'offen',?,?,?,?,?,?,'rechnung')`
     ).run(number, order.id, order.customer_id, order.property_id, date, dueDate,
       (order.completed_at ? String(order.completed_at).slice(0, 10) : date), taxRate,
       totals.subtotal, totals.tax, totals.total, notes,
@@ -153,6 +169,85 @@ export function createInvoiceFromOrder(orderId, { date = todayISO(), dueDays = n
     throw error;
   }
 
+  const created = db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId);
+  try {
+    const pdf = invoicePdf(invoiceId, { persist: true });
+    archiveInvoicePdf(created, pdf?.buffer);
+  } catch (error) {
+    logActivity('fehler', `Dokumentenarchiv für ${number}: ${error.message}`);
+  }
+  return created;
+}
+
+/**
+ * Abschlagsrechnung (Teilrechnung) zu einem Auftrag. Der Auftrag bleibt offen,
+ * bis die Schlussrechnung gestellt wird; Abschläge werden dort abgezogen.
+ */
+export function createProgressInvoice(orderId, {
+  percent = 0, amount = null, date = todayISO(), dueDays = null, notes = '',
+} = {}) {
+  const data = loadOrderData(orderId);
+  if (!data) throw new Error('Auftrag nicht gefunden');
+  const { order, items, customer } = data;
+  if (order.doc_type === 'angebot') throw new Error('Angebote müssen zuerst in einen Auftrag umgewandelt werden');
+  if (order.status === 'storniert') throw new Error('Stornierte Aufträge können nicht abgerechnet werden');
+
+  const settings = getSettings();
+  const taxRate = Number(order.tax_rate) || Number(settings.default_tax_rate);
+  const basePositions = items.length
+    ? items
+    : order.labor_hours > 0
+      ? [{ kind: 'arbeit', description: 'Ausgeführte Arbeiten', quantity: order.labor_hours, unit: 'Std', unit_price: order.labor_rate }]
+      : [];
+  if (!basePositions.length) throw new Error('Der Auftrag hat keine abrechenbaren Positionen');
+  const base = invoiceTotals(basePositions, taxRate);
+  const previous = db.prepare(
+    "SELECT COALESCE(SUM(subtotal), 0) AS net, COALESCE(SUM(percent), 0) AS percent FROM invoices WHERE order_id = ? AND kind = 'abschlag' AND status != 'storniert'"
+  ).get(orderId);
+
+  const percentage = Number(percent);
+  if (percentage && (!Number.isFinite(percentage) || percentage <= 0 || percentage > 100)) {
+    throw new Error('Bitte einen Prozentsatz zwischen 0 und 100 angeben');
+  }
+  if (percentage && Number(previous.percent) + percentage > 100) {
+    throw new Error(`Die Abschläge würden 100 % überschreiten (bereits ${round2(Number(previous.percent))} %).`);
+  }
+  const net = amount != null && Number(amount) > 0
+    ? round2(Number(amount))
+    : round2(base.subtotal * (percentage / 100));
+  if (!net || net <= 0) throw new Error('Bitte einen Prozentsatz oder Betrag angeben');
+  if (net + Number(previous.net) > base.subtotal + 0.01) {
+    throw new Error(`Der Abschlag übersteigt die Auftragssumme (offen: ${round2(base.subtotal - Number(previous.net)).toFixed(2)} € netto).`);
+  }
+
+  const totals = invoiceTotals([{ quantity: 1, unit_price: net }], taxRate);
+  const paymentDays = Number(dueDays ?? customer?.payment_terms_days ?? settings.payment_days);
+  const dueDate = addDays(date, paymentDays);
+  const number = nextNumber('invoice', settings.invoice_prefix);
+  const description = percentage
+    ? `Abschlagszahlung ${round2(percentage)} % gemäß Auftrag ${order.number}`
+    : `Abschlagszahlung gemäß Auftrag ${order.number}`;
+
+  db.exec('BEGIN');
+  let invoiceId;
+  try {
+    invoiceId = Number(db.prepare(
+      `INSERT INTO invoices (number, order_id, customer_id, property_id, date, due_date, service_date, status, tax_rate,
+         subtotal, tax_total, total, notes, buyer_reference, kind, percent)
+       VALUES (?,?,?,?,?,?,?,'offen',?,?,?,?,?,?,'abschlag',?)`
+    ).run(number, order.id, order.customer_id, order.property_id, date, dueDate, todayISO(), taxRate,
+      totals.subtotal, totals.tax, totals.total, notes,
+      customer?.leitweg_id || customer?.buyer_reference || number, percentage || null).lastInsertRowid);
+    db.prepare(
+      `INSERT INTO invoice_items (invoice_id, kind, description, quantity, unit, unit_price, sort)
+       VALUES (?,'abschlag',?,1,'Psch',?,0)`
+    ).run(invoiceId, description, net);
+    logActivity('rechnung', `Abschlagsrechnung ${number} über ${totals.total.toFixed(2)} € für ${order.number} erstellt.`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
   const created = db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId);
   try {
     const pdf = invoicePdf(invoiceId, { persist: true });
@@ -225,15 +320,23 @@ export function createDunning(invoiceId) {
   return { invoice: db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId), buffer, filename, dunning };
 }
 
-export function orderPdf(orderId) {
+const ORDER_PDF_TYPES = {
+  angebot: 'Angebot',
+  auftrag: 'Auftrag',
+  auftragsbestaetigung: 'Auftragsbestaetigung',
+  lieferschein: 'Lieferschein',
+};
+
+export function orderPdf(orderId, docType = null) {
   const data = loadOrderData(orderId);
   if (!data) return null;
   const settings = getSettings();
-  const buffer = renderOrderPdf({ ...data, settings, docType: data.order.doc_type });
-  const prefix = data.order.doc_type === 'angebot' ? 'Angebot' : 'Auftrag';
+  const type = ORDER_PDF_TYPES[docType] ? docType : data.order.doc_type;
+  const buffer = renderOrderPdf({ ...data, settings, docType: type });
+  const prefix = ORDER_PDF_TYPES[type] || 'Auftrag';
   const filename = `${prefix}-${data.order.number}.pdf`.replace(/[^A-Za-z0-9._-]+/g, '-');
   writeFileSync(join(PDF_DIR, filename), buffer);
-  return { buffer, filename };
+  return { buffer, filename, type };
 }
 
 export function invoiceStats() {

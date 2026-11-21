@@ -19,6 +19,8 @@ const state = {
   lookupResults: [],
   weekStart: null,
   ordersFilter: 'offen',
+  tasksFilter: 'offen',
+  leadsFilter: 'alle',
   invoicesFilter: 'offen',
   customersFilter: 'alle',
   documentsFilter: 'alle',
@@ -27,6 +29,8 @@ const state = {
   contractsFilter: 'aktiv',
   reportsFilter: 'alle',
   time: null,
+  timeCategories: [],
+  scanStream: null,
   todayMinutes: 0,
   weekMinutes: 0,
   currentOrderId: null,
@@ -264,6 +268,7 @@ function closeModal() {
     state.dictation.stop();
     state.dictation = null;
   }
+  stopScanCamera();
   $('#modal-root').innerHTML = '';
   document.body.style.overflow = '';
   document.body.classList.remove('modal-open');
@@ -360,6 +365,8 @@ const PAGES = {
   my: { title: 'Mein Tag', sub: 'Zeiten, Aufträge und Berichte', primary: { label: 'Bericht schreiben', action: 'new-report', permission: 'reports.own' }, render: renderMyDay },
   time: { title: 'Zeiterfassung', sub: 'Ein- und Ausstempeln, Zeiten nachtragen', primary: { label: 'Zeit nachtragen', action: 'new-time', permissions: ['time.own', 'time.manage'] }, render: renderTime },
   reports: { title: 'Berichte', sub: 'Montageberichte, Material und Fotos', primary: { label: 'Neuer Bericht', action: 'new-report', permission: 'reports.own' }, render: renderReports },
+  tasks: { title: 'Aufgaben & Pinnwand', sub: 'Aufgaben, Nachrichten und Team-Feed', primary: { label: 'Neue Aufgabe', action: 'new-task', permission: 'tasks.manage' }, render: renderTasks },
+  leads: { title: 'Anfragen & CRM', sub: 'Anfragen von der Website bis zum Auftrag', primary: { label: 'Neue Anfrage', action: 'new-lead', permission: 'leads.manage' }, render: renderLeads },
   orders: { title: 'Aufträge & Angebote', sub: 'Aufträge planen, bearbeiten und abrechnen', primary: { label: 'Neuer Auftrag', action: 'new-order', permission: 'orders.manage' }, render: renderOrders },
   planning: { title: 'Einsatzplanung / Kalender', sub: 'Wochenplan für Monteure, Büro und Chef', primary: { label: 'Termin anlegen', action: 'new-appointment', permission: 'planning.manage' }, render: renderPlanning },
   customers: { title: 'Kunden & Objekte', sub: 'Stammdaten und Historie', primary: { label: 'Neuer Kunde', action: 'new-customer', permission: 'customers.manage' }, render: renderCustomers },
@@ -377,6 +384,8 @@ const PAGE_GUARDS = {
   my: () => canAny('dashboard.view', 'orders.view.own', 'planning.view'),
   time: () => canAny('time.own', 'time.view.all'),
   reports: () => canAny('reports.own', 'reports.view.all'),
+  tasks: () => can('tasks.view'),
+  leads: () => can('leads.view'),
   orders: () => canAny('orders.view.all', 'orders.view.own'),
   planning: () => can('planning.view'),
   customers: () => can('customers.view'),
@@ -470,6 +479,12 @@ async function updateBadges() {
     if (statusLabel) {
       statusLabel.innerHTML = `<span class="automation-dot"${automatikOn ? '' : ' style="background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.18)"'}></span>${automatikOn ? 'Automatik aktiv' : 'Automatik pausiert'}`;
     }
+    const [notifications, tasks] = await Promise.all([
+      api.get('/api/notifications?limit=1').catch(() => null),
+      can('tasks.view') ? api.get('/api/tasks?status=offen').catch(() => null) : null,
+    ]);
+    setBadge('#badge-notifications', notifications?.unread || 0);
+    setBadge('#badge-tasks', tasks?.tasks?.length || 0);
   } catch { /* stumm */ }
 }
 
@@ -1058,6 +1073,12 @@ async function openOrder(orderId) {
         ${canProgress ? `<button class="tech-btn" type="button" data-action="order-signature" data-id="${order.id}">${icon('edit')}<span>Unterschrift</span></button>` : ''}
         ${can('documents.view') ? `<button class="tech-btn" type="button" data-action="order-documents" data-id="${order.id}">${icon('file')}<span>Dokumente</span></button>` : ''}
         ${canMoney ? `<button class="tech-btn" type="button" data-action="order-gaeb" data-id="${order.id}">${icon('download')}<span>GAEB / OCI</span></button>` : ''}
+        ${can('messages.use') ? `<button class="tech-btn" type="button" data-action="order-messages" data-id="${order.id}">${icon('send')}<span>Nachrichten</span></button>` : ''}
+        ${can('warehouse.view') ? `<button class="tech-btn" type="button" data-action="order-reservations" data-id="${order.id}">${icon('box')}<span>Packliste</span></button>` : ''}
+        ${canManage ? `<button class="tech-btn" type="button" data-action="order-doc" data-type="auftragsbestaetigung" data-id="${order.id}">${icon('file')}<span>Bestätigung</span></button>` : ''}
+        ${canManage ? `<button class="tech-btn" type="button" data-action="order-doc" data-type="lieferschein" data-id="${order.id}">${icon('box')}<span>Lieferschein</span></button>` : ''}
+        ${can('invoices.manage') && !isQuote && !locked ? `<button class="tech-btn" type="button" data-action="order-progress-invoice" data-id="${order.id}">${icon('euro')}<span>Abschlag</span></button>` : ''}
+        ${canManage ? `<button class="tech-btn" type="button" data-action="order-send-doc" data-id="${order.id}">${icon('mail')}<span>Senden</span></button>` : ''}
         ${can('assistant.use') ? `<button class="tech-btn" type="button" data-action="assistant" data-kind="angebot" data-id="${order.id}">${icon('mic')}<span>Textassistent</span></button>` : ''}
       </div>
     </div>
@@ -1483,6 +1504,7 @@ async function openInvoice(invoiceId) {
   const footer = `
     <div class="left">
       <button class="btn sm" type="button" data-action="invoice-pdf" data-id="${invoice.id}">${icon('file')} PDF</button>
+      ${can('invoices.manage') ? `<button class="btn sm" type="button" data-action="invoice-send-mail" data-id="${invoice.id}">${icon('mail')} Per E-Mail</button>` : ''}
       <button class="btn sm" type="button" data-action="invoice-einvoice" data-id="${invoice.id}" data-format="xrechnung">${icon('download')} XRechnung</button>
       <button class="btn sm" type="button" data-action="invoice-einvoice" data-id="${invoice.id}" data-format="zugferd">${icon('download')} ZUGFeRD</button>
       ${invoice.dunning_level ? `<button class="btn sm" type="button" data-action="invoice-pdf" data-id="${invoice.id}" data-mahnung="1">${icon('download')} Mahnung</button>` : ''}
@@ -1784,6 +1806,7 @@ async function openCustomer(customerId) {
       <div class="left">
         ${manage ? `<button class="btn sm" data-action="edit-customer" data-id="${customer.id}">${icon('edit')} Bearbeiten</button>
         <button class="btn sm danger" data-action="delete-customer" data-id="${customer.id}">${icon('trash')} Löschen</button>` : ''}
+        ${can('portal.manage') ? `<button class="btn sm" data-action="portal-link" data-id="${customer.id}">${icon('send')} Kundenportal</button>` : ''}
       </div>
       <button class="btn" data-action="close-modal">Schließen</button>`,
   });
@@ -2943,10 +2966,12 @@ function timeForm() {
       { name: 'start', label: 'Von', type: 'time', required: true, default: '08:00' },
       { name: 'end', label: 'Bis', type: 'time', required: true, default: '16:00' },
       { name: 'order_id', label: 'Auftrag (optional)', type: 'select', options: (state.orderOptions || []), placeholder: 'Ohne Auftrag' },
-      { name: 'type', label: 'Art', type: 'select', options: [
-        { value: 'arbeit', label: 'Arbeit' }, { value: 'fahrt', label: 'Fahrt' },
-        { value: 'urlaub', label: 'Urlaub' }, { value: 'krank', label: 'Krank' }, { value: 'schule', label: 'Schule' },
-      ], default: 'arbeit' },
+      { name: 'type', label: 'Art', type: 'select', options: (state.timeCategories.length
+        ? state.timeCategories.map((category) => ({ value: category.key, label: category.label }))
+        : [
+          { value: 'arbeit', label: 'Arbeit' }, { value: 'fahrt', label: 'Fahrt' },
+          { value: 'urlaub', label: 'Urlaub' }, { value: 'krank', label: 'Krank' }, { value: 'schule', label: 'Schule' },
+        ]), default: 'arbeit' },
       { name: 'note', label: 'Notiz', full: true },
     ],
     submitLabel: 'Speichern',
@@ -3729,7 +3754,13 @@ async function renderTeam() {
 
     <div class="section-head">
       <div><h2>Team</h2><div class="sub">Anwesenheit und Kontaktdaten</div></div>
-      ${can('employees.manage') ? `<button class="btn sm" type="button" data-action="new-employee">${icon('plus')} Mitarbeiter</button>` : ''}
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        ${can('hr.manage') ? `<button class="btn sm" type="button" data-action="new-employment-contract">${icon('file')} Verträge</button>
+        <button class="btn sm" type="button" data-action="time-categories">${icon('clock')} Zeitkategorien</button>
+        <button class="btn sm" type="button" data-action="maternity">${icon('calendar')} Mutterschutz</button>` : ''}
+        ${can('hr.payroll') ? `<button class="btn sm" type="button" data-action="payroll">${icon('euro')} Lohnvorbereitung</button>` : ''}
+        ${can('employees.manage') ? `<button class="btn sm" type="button" data-action="new-employee">${icon('plus')} Mitarbeiter</button>` : ''}
+      </div>
     </div>
 
     <div class="team-grid">
@@ -3747,6 +3778,7 @@ async function renderTeam() {
           </div>
           <div class="team-actions">
             ${employee.phone ? `<a class="icon-btn" href="tel:${esc(employee.phone.replace(/[^+\d]/g, ''))}" title="Anrufen">${icon('phone')}</a>` : ''}
+            ${can('hr.manage') || state.user?.employee_id === employee.id ? `<button class="icon-btn" type="button" data-action="employee-file" data-id="${employee.id}" title="Personalakte">${icon('file')}</button>` : ''}
             ${can('employees.manage') ? `<button class="icon-btn" type="button" data-action="edit-employee" data-id="${employee.id}" title="Bearbeiten">${icon('edit')}</button>` : ''}
             ${can('users.manage') ? `<button class="icon-btn" type="button" data-action="new-user" data-employee="${employee.id}" title="Benutzerkonto anlegen">${icon('user')}</button>` : ''}
           </div>
@@ -3758,6 +3790,7 @@ async function renderTeam() {
             <div class="small muted">${esc(employee.role || '')}${employee.phone ? ` · ${esc(employee.phone)}` : ''}</div>
           </div>
           <div class="team-actions">
+            ${can('hr.manage') || state.user?.employee_id === employee.id ? `<button class="icon-btn" type="button" data-action="employee-file" data-id="${employee.id}" title="Personalakte">${icon('file')}</button>` : ''}
             ${can('employees.manage') ? `<button class="icon-btn" type="button" data-action="edit-employee" data-id="${employee.id}" title="Bearbeiten">${icon('edit')}</button>` : ''}
           </div>
         </div>`).join('')}
@@ -4783,6 +4816,17 @@ async function renderSettings() {
             ${input('hr_weekly_hours', 'Wochenstunden', { type: 'number', step: '0.5' })}
             ${input('hr_vacation_days', 'Urlaubsanspruch (Tage)', { type: 'number', step: '0.5' })}
           </div>
+          <div class="toggle-row">
+            <div class="tr-main">
+              <div class="tr-title">Pausenautomatik</div>
+              <div class="tr-sub">Beim Ausstempeln die gesetzliche Pause automatisch abziehen (nach § 4 ArbZG).</div>
+            </div>
+            <label class="switch"><input type="checkbox" name="break_auto" ${settings.break_auto === '1' ? 'checked' : ''} /><span></span></label>
+          </div>
+          <div class="form-grid">
+            ${input('break_after_6h', 'Pause ab 6 Stunden (Minuten)', { type: 'number', step: '1' })}
+            ${input('break_after_9h', 'Pause ab 9 Stunden (Minuten)', { type: 'number', step: '1' })}
+          </div>
           <div class="hr"></div>
           <div class="section-head compact"><div><h3>Checklistenvorlagen</h3><div class="small muted">${checklistData.length} Vorlagen</div></div>
             <button class="btn sm" type="button" data-action="new-checklist-template">${icon('plus')} Vorlage</button></div>
@@ -4918,6 +4962,604 @@ function openPasswordChange({ mandatory = false } = {}) {
     },
   });
 }
+
+/* ============================================================================
+ * HERO-Parität: Aufgaben, Pinnwand, CRM, Kundenportal, Lager und Personal
+ * ========================================================================== */
+
+const TASK_PRIORITY_CLASS = { hoch: 'overdue', dringend: 'overdue', normal: 'neutral', niedrig: 'neutral' };
+
+async function renderTasks() {
+  const data = await api.get('/api/tasks');
+  const feed = await api.get('/api/feed?limit=25').catch(() => ({ items: [] }));
+  const tasks = data.tasks || [];
+  const filter = state.tasksFilter || 'offen';
+  const visible = tasks.filter((task) => filter === 'alle'
+    || (filter === 'offen' ? task.status === 'offen' : task.status === filter));
+  const open = tasks.filter((task) => task.status === 'offen');
+  const overdue = open.filter((task) => task.overdue);
+  const done = tasks.filter((task) => task.status === 'erledigt');
+
+  view.innerHTML = `
+    <div class="kpi-grid tight">
+      <div class="kpi"><div class="ico">${icon('check')}</div><div class="label">Offene Aufgaben</div><div class="value">${open.length}</div><div class="foot">${overdue.length} überfällig</div></div>
+      <div class="kpi"><div class="ico">${icon('alert')}</div><div class="label">Überfällig</div><div class="value">${overdue.length}</div><div class="foot">bitte zuerst erledigen</div></div>
+      <div class="kpi"><div class="ico">${icon('users')}</div><div class="label">Erledigt</div><div class="value">${done.length}</div><div class="foot">im Team</div></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="chips">
+        ${[['offen', 'Offen'], ['erledigt', 'Erledigt'], ['alle', 'Alle']].map(([value, label]) => `
+          <button class="chip ${filter === value ? 'active' : ''}" data-action="filter-tasks" data-filter="${value}">
+            ${label} <span class="count">${value === 'offen' ? open.length : value === 'erledigt' ? done.length : tasks.length}</span>
+          </button>`).join('')}
+      </div>
+      ${can('tasks.manage') ? `<button class="btn sm primary" data-action="new-task">${icon('plus')} Aufgabe</button>` : ''}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div><h2>Aufgaben</h2><div class="sub">Zugewiesen, terminiert und abhakbar</div></div></div>
+      <div class="card-body">
+        ${visible.length ? `<div class="task-list">${visible.map((task) => `
+          <div class="task-row ${task.status === 'erledigt' ? 'done' : ''}">
+            <button class="task-check ${task.status === 'erledigt' ? 'checked' : ''}" type="button"
+              data-action="toggle-task" data-id="${task.id}" data-status="${task.status}"
+              ${can('tasks.complete') ? '' : 'disabled'} title="${task.status === 'erledigt' ? 'Wieder öffnen' : 'Erledigt'}">
+              ${task.status === 'erledigt' ? icon('check') : ''}
+            </button>
+            <div class="task-main">
+              <div class="task-title">${esc(task.title)}</div>
+              <div class="small muted">
+                ${task.employee_name ? `${icon('user')} ${esc(task.employee_name)}` : 'Nicht zugewiesen'}
+                ${task.due_date ? ` · ${icon('calendar')} ${fmtDate(task.due_date)}` : ''}
+                ${task.order_number ? ` · <a href="#/orders" data-action="open-order" data-id="${task.order_id}">${esc(task.order_number)}</a>` : ''}
+              </div>
+              ${task.description ? `<div class="small" style="margin-top:4px">${esc(task.description)}</div>` : ''}
+            </div>
+            <span class="badge ${TASK_PRIORITY_CLASS[task.priority] || 'neutral'}">${esc(task.priority_label || task.priority)}</span>
+            ${can('tasks.manage') ? `<span class="lr-actions">
+              <button class="icon-btn" type="button" data-action="edit-task" data-id="${task.id}" title="Bearbeiten">${icon('edit')}</button>
+              <button class="icon-btn" type="button" data-action="delete-task" data-id="${task.id}" title="Löschen">${icon('trash')}</button>
+            </span>` : ''}
+          </div>`).join('')}</div>` : `<div class="empty">${icon('check')}<div>Keine Aufgaben in diesem Filter</div></div>`}
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:18px">
+      <div class="card-head"><div><h2>Pinnwand</h2><div class="sub">Was zuletzt im Betrieb passiert ist</div></div></div>
+      <div class="card-body">
+        ${feed.items.length ? `<div class="feed-list">${feed.items.map((item) => `
+          <div class="feed-item">
+            <span class="feed-dot"></span>
+            <div><div>${esc(item.message)}</div><div class="small muted">${fmtDateTime(item.at)} · ${esc(item.type)}</div></div>
+          </div>`).join('')}</div>` : '<div class="small muted">Noch keine Einträge.</div>'}
+      </div>
+    </div>`;
+}
+
+async function renderLeads() {
+  const data = await api.get('/api/leads');
+  const leads = data.leads || [];
+  const stages = data.stages || [];
+  state.leads = leads;
+  const totalValue = leads.reduce((sum, lead) => sum + Number(lead.value || 0), 0);
+  const open = leads.filter((lead) => !lead.stage_closed);
+
+  view.innerHTML = `
+    <div class="kpi-grid tight">
+      <div class="kpi"><div class="ico">${icon('users')}</div><div class="label">Anfragen</div><div class="value">${leads.length}</div><div class="foot">${open.length} in Bearbeitung</div></div>
+      <div class="kpi"><div class="ico">${icon('euro')}</div><div class="label">Potenzial</div><div class="value">${money(totalValue)}</div><div class="foot">alle Anfragen</div></div>
+      <div class="kpi"><div class="ico">${icon('check')}</div><div class="label">Gewonnen</div><div class="value">${leads.filter((lead) => lead.stage_closed && lead.customer_id).length}</div><div class="foot">als Kunde angelegt</div></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="chips">
+        <button class="chip active">Pipeline</button>
+      </div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn sm" data-action="lead-link">${icon('send')} Anfrageformular</button>
+        ${can('leads.manage') ? `<button class="btn sm" data-action="lead-stages">${icon('edit')} Stufen</button>
+        <button class="btn sm primary" data-action="new-lead">${icon('plus')} Anfrage</button>` : ''}
+      </div>
+    </div>
+
+    <div class="pipeline">
+      ${stages.map((stage) => {
+        const rows = leads.filter((lead) => lead.stage_id === stage.id);
+        return `
+          <section class="pipeline-col ${stage.closed ? 'closed' : ''}">
+            <header><div><b>${esc(stage.name)}</b><span class="muted small">${rows.length}</span></div>
+              <span class="small muted">${money(rows.reduce((sum, lead) => sum + Number(lead.value || 0), 0))}</span></header>
+            <div class="pipeline-body">
+              ${rows.length ? rows.map((lead) => `
+                <button class="lead-card" type="button" data-action="edit-lead" data-id="${lead.id}">
+                  <div class="lead-top"><b>${esc(lead.name)}</b><span class="small muted">${esc(lead.source_label || lead.source)}</span></div>
+                  ${lead.company ? `<div class="small">${esc(lead.company)}</div>` : ''}
+                  <div class="small muted">${esc(lead.phone || lead.email || 'Keine Kontaktdaten')}</div>
+                  <div class="lead-foot">
+                    <span>${lead.value ? money(lead.value) : '–'}</span>
+                    ${lead.customer_id ? '<span class="badge bezahlt">Kunde</span>' : ''}
+                  </div>
+                </button>`).join('') : '<div class="small muted" style="padding:10px">Keine Anfragen</div>'}
+            </div>
+          </section>`;
+      }).join('')}
+    </div>`;
+}
+
+function taskForm(task = null) {
+  formModal({
+    title: task ? 'Aufgabe bearbeiten' : 'Neue Aufgabe',
+    subtitle: task ? task.title : 'Aufgabe anlegen und zuweisen',
+    fields: [
+      { name: 'title', label: 'Titel', required: true, full: true },
+      { name: 'description', label: 'Beschreibung', type: 'textarea', rows: 3, full: true, dictate: true },
+      { name: 'employee_id', label: 'Zuständig', type: 'select', options: [
+        { value: '', label: 'Nicht zuweisen' },
+        ...state.employees.map((employee) => ({ value: employee.id, label: employee.name })),
+      ] },
+      { name: 'due_date', label: 'Fällig am', type: 'date' },
+      { name: 'priority', label: 'Priorität', type: 'select', options: [
+        { value: 'niedrig', label: 'Niedrig' }, { value: 'normal', label: 'Normal' }, { value: 'hoch', label: 'Hoch' },
+      ] },
+    ],
+    values: {
+      ...(task || {}),
+      employee_id: task?.employee_id ?? state.user?.employee_id ?? '',
+      priority: task?.priority || 'normal',
+    },
+    submitLabel: task ? 'Speichern' : 'Aufgabe anlegen',
+    onSubmit: async (values) => {
+      const payload = {
+        title: values.title,
+        description: values.description,
+        employee_id: values.employee_id ? Number(values.employee_id) : null,
+        due_date: values.due_date || null,
+        priority: values.priority,
+      };
+      if (task) await api.put(`/api/tasks/${task.id}`, payload);
+      else await api.post('/api/tasks', payload);
+      closeModal();
+      toast(task ? 'Aufgabe gespeichert.' : 'Aufgabe angelegt.');
+      await refresh();
+      refreshBadgesOnly();
+    },
+  });
+}
+
+function leadForm(lead = null) {
+  const stages = state.leadStages || [];
+  formModal({
+    title: lead ? 'Anfrage bearbeiten' : 'Neue Anfrage',
+    subtitle: lead ? `${lead.name} · ${lead.source_label || lead.source}` : 'Anfrage manuell erfassen',
+    fields: [
+      { name: 'name', label: 'Name', required: true, full: true },
+      { name: 'company', label: 'Firma' },
+      { name: 'source', label: 'Quelle', type: 'select', options: Object.entries(state.leadSources || { website: 'Website' }).map(([value, label]) => ({ value, label })) },
+      { name: 'email', label: 'E-Mail', type: 'email' },
+      { name: 'phone', label: 'Telefon' },
+      { name: 'stage_id', label: 'Stufe', type: 'select', options: stages.map((stage) => ({ value: stage.id, label: stage.name })) },
+      { name: 'value', label: 'Wert (€)', type: 'number', step: '0.01', min: 0 },
+      { name: 'message', label: 'Anliegen', type: 'textarea', rows: 3, full: true, dictate: true },
+      { name: 'notes', label: 'Interne Notizen', type: 'textarea', rows: 2, full: true },
+    ],
+    values: lead || { source: 'telefon' },
+    submitLabel: lead ? 'Speichern' : 'Anfrage anlegen',
+    onSubmit: async (values) => {
+      const payload = { ...values, stage_id: values.stage_id ? Number(values.stage_id) : null };
+      if (lead) await api.put(`/api/leads/${lead.id}`, payload);
+      else await api.post('/api/leads', payload);
+      closeModal();
+      toast(lead ? 'Anfrage gespeichert.' : 'Anfrage angelegt.');
+      await refresh();
+    },
+  });
+}
+
+async function loadLeadMeta() {
+  if (state.leadStages) return;
+  const data = await api.get('/api/lead-stages');
+  state.leadStages = data.stages || [];
+  state.leadSources = data.sources || {};
+}
+
+async function editLeadModal(id) {
+  await loadLeadMeta();
+  const lead = (state.leads || []).find((row) => row.id === Number(id));
+  if (!lead) return toast('Anfrage nicht gefunden.', 'error');
+  leadForm(lead);
+  const modal = $('#modal-root .modal');
+  if (!modal) return;
+  const footer = modal.querySelector('.modal-foot');
+  if (footer && can('leads.manage')) {
+    footer.insertAdjacentHTML('afterbegin', `
+      <div class="left">
+        ${!lead.customer_id ? `<button class="btn sm primary" type="button" data-action="convert-lead" data-id="${lead.id}">${icon('user')} Kunde anlegen</button>` : ''}
+        <button class="btn sm danger" type="button" data-action="delete-lead" data-id="${lead.id}">${icon('trash')} Löschen</button>
+      </div>`);
+  }
+}
+
+async function leadLinkModal() {
+  try {
+    const data = await api.post('/api/leads/token');
+    const link = `${location.origin}${data.path}`;
+    openModal({
+      title: 'Öffentliches Anfrageformular',
+      subtitle: 'Diesen Link auf die Website setzen – keine Anmeldung nötig.',
+      body: `<div class="subcard"><div class="small muted">Anfrageformular</div>
+        <input id="lead-link" readonly value="${esc(link)}" />
+        <div class="small muted" style="margin-top:8px">Neue Anfragen erscheinen in der Pipeline und als Benachrichtigung.</div></div>`,
+      footer: `<button class="btn" data-action="close-modal">Schließen</button>
+        <button class="btn primary" data-action="copy-lead-link">${icon('file')} Link kopieren</button>`,
+    });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function leadStagesModal() {
+  await loadLeadMeta();
+  const stages = state.leadStages || [];
+  openModal({
+    title: 'Anfrage-Stufen',
+    subtitle: 'Pipeline an den Betrieb anpassen',
+    body: `<div class="list-stack">${stages.map((stage) => `
+      <div class="list-row static">
+        <span class="list-ico">${icon('arrow')}</span>
+        <span class="list-main"><b>${esc(stage.name)}</b><small>Sortierung ${Number(stage.sort)}${stage.closed ? ' · Abschlussstufe' : ''}</small></span>
+        <span class="lr-actions">
+          <button class="icon-btn" data-action="edit-lead-stage" data-id="${stage.id}" title="Bearbeiten">${icon('edit')}</button>
+          <button class="icon-btn" data-action="delete-lead-stage" data-id="${stage.id}" title="Löschen">${icon('trash')}</button>
+        </span>
+      </div>`).join('')}</div>`,
+    footer: `<button class="btn" data-action="close-modal">Schließen</button>
+      <button class="btn primary" data-action="new-lead-stage">${icon('plus')} Stufe</button>`,
+  });
+}
+
+function leadStageForm(stage = null) {
+  formModal({
+    title: stage ? 'Stufe bearbeiten' : 'Neue Stufe',
+    fields: [
+      { name: 'name', label: 'Name', required: true },
+      { name: 'sort', label: 'Sortierung', type: 'number', default: 10 },
+      { name: 'closed', label: 'Abschlussstufe', type: 'checkbox', checkLabel: 'Anfrage gilt als abgeschlossen' },
+    ],
+    values: stage || {},
+    onSubmit: async (values) => {
+      if (stage) await api.put(`/api/lead-stages/${stage.id}`, values);
+      else await api.post('/api/lead-stages', values);
+      state.leadStages = null;
+      closeModal();
+      toast('Stufe gespeichert.');
+      await renderLeads();
+    },
+  });
+}
+
+async function notificationsModal() {
+  try {
+    const data = await api.get('/api/notifications?limit=40');
+    openModal({
+      title: 'Benachrichtigungen',
+      subtitle: data.unread ? `${data.unread} ungelesen` : 'Alles gelesen',
+      body: data.items.length ? `<div class="list-stack">${data.items.map((item) => `
+        <div class="list-row static ${item.read_at ? '' : 'unread'}">
+          <span class="list-ico">${icon(item.kind === 'task' ? 'check' : item.kind === 'lead' ? 'users' : 'alert')}</span>
+          <span class="list-main"><b>${esc(item.title)}</b>
+            <small>${esc(item.body || '')}</small>
+            <small>${fmtDateTime(item.created_at)}</small></span>
+          ${item.link ? `<button class="icon-btn" data-action="goto-link" data-link="${esc(item.link)}" title="Öffnen">${icon('arrow')}</button>` : ''}
+        </div>`).join('')}</div>` : `<div class="empty">${icon('check')}<div>Keine Benachrichtigungen</div></div>`,
+      footer: `<button class="btn" data-action="close-modal">Schließen</button>
+        <button class="btn primary" data-action="read-notifications">${icon('check')} Alle gelesen</button>`,
+    });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function orderMessagesModal(orderId) {
+  const data = await api.get(`/api/messages?order_id=${orderId}`);
+  const messages = data.messages || [];
+  openModal({
+    title: 'Nachrichten zum Auftrag',
+    subtitle: 'Büro und Monteur bleiben auf demselben Stand',
+    size: 'wide',
+    body: `<div class="message-list" id="order-message-list">
+        ${messages.length ? messages.map((message) => `
+          <div class="message-bubble ${message.employee_id && message.employee_id === state.user?.employee_id ? 'own' : ''}">
+            <div class="small muted">${esc(message.user_name || message.employee_name || 'Unbekannt')} · ${fmtDateTime(message.created_at)}</div>
+            <div>${esc(message.body)}</div>
+          </div>`).join('') : '<div class="small muted">Noch keine Nachrichten.</div>'}
+      </div>
+      <form id="order-message-form" class="inline-form" style="margin-top:12px">
+        <div class="row"><div style="flex:1"><label>Neue Nachricht</label>
+          <input name="body" placeholder="Kurz schreiben…" autocomplete="off" /></div>
+          <div><button class="btn primary sm" type="submit">${icon('send')} Senden</button></div></div>
+      </form>`,
+    footer: '<button class="btn" data-action="close-modal">Schließen</button>',
+  });
+  $('#order-message-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const input = event.target.elements.body;
+    if (!input.value.trim()) return;
+    try {
+      await api.post('/api/messages', { order_id: Number(orderId), body: input.value });
+      toast('Nachricht gesendet.');
+      await orderMessagesModal(orderId);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+}
+
+async function orderReservationsModal(orderId) {
+  const data = await api.get(`/api/orders/${orderId}/packlist`);
+  const items = data.items || [];
+  const order = data.order;
+  openModal({
+    title: `Packliste ${order.number}`,
+    subtitle: `${order.title}${order.employee_name ? ` · ${order.employee_name}` : ''}`,
+    size: 'wide',
+    body: `<div class="small muted" style="margin-bottom:10px">${esc(order.property_label || '')} ${esc(order.street || '')} ${esc(order.zip || '')} ${esc(order.city || '')}</div>
+      ${items.length ? `<div class="list-stack">${items.map((item) => `
+        <div class="list-row static ${item.packed ? 'done' : ''}">
+          <button class="task-check ${item.packed ? 'checked' : ''}" type="button" data-action="toggle-reservation" data-id="${item.id}" data-packed="${item.packed ? 1 : 0}" ${can('warehouse.manage') ? '' : 'disabled'}>${item.packed ? icon('check') : ''}</button>
+          <span class="list-main"><b>${esc(item.article_name)}</b>
+            <small>${num2(item.quantity)} ${esc(item.unit || '')} · Artikel ${esc(item.article_number || '–')}</small></span>
+          ${can('warehouse.manage') ? `<button class="icon-btn" data-action="delete-reservation" data-id="${item.id}" data-order="${order.id}" title="Entfernen">${icon('trash')}</button>` : ''}
+        </div>`).join('')}</div>` : '<div class="small muted">Noch keine Reservierungen.</div>'}
+      ${can('warehouse.manage') ? `<form id="reservation-form" class="inline-form" style="margin-top:12px">
+        <div class="row">
+          <div style="flex:1"><label>Artikel</label><select name="article_id">
+            <option value="">Artikel wählen…</option>
+            ${(state.articles || []).map((article) => `<option value="${article.id}" data-stock="${article.stock}">${esc(article.name)} (${num2(article.available ?? article.stock)} ${esc(article.unit || '')})</option>`).join('')}
+          </select></div>
+          <div><label>Menge</label><input name="quantity" type="number" min="0.01" step="0.01" value="1" style="width:90px" /></div>
+          <div><button class="btn primary sm" type="submit">${icon('plus')} Reservieren</button></div>
+        </div>
+      </form>` : ''}
+      ${can('warehouse.manage') ? `<div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
+        <button class="btn sm" data-action="order-oci" data-id="${order.id}">${icon('download')} OCI-Bestellung</button>
+        <button class="btn sm" data-action="order-dealer" data-id="${order.id}">${icon('send')} Beim Händler bestellen</button>
+      </div>` : ''}`,
+    footer: '<button class="btn" data-action="close-modal">Schließen</button>',
+  });
+  $('#reservation-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    if (!form.elements.article_id.value) return toast('Bitte einen Artikel wählen.', 'error');
+    try {
+      await api.post(`/api/orders/${orderId}/reservations`, {
+        article_id: Number(form.elements.article_id.value),
+        quantity: Number(form.elements.quantity.value),
+      });
+      toast('Reservierung gespeichert.');
+      await orderReservationsModal(orderId);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+}
+
+async function employeeFileModal(employeeId) {
+  try {
+    const data = await api.get(`/api/employees/${employeeId}/file`);
+    const { employee, contracts, documents, absences, vacation, overtime } = data;
+    openModal({
+      title: `Personalakte ${employee.name}`,
+      subtitle: `${employee.role || ''}${employee.entry_date ? ` · seit ${fmtDate(employee.entry_date)}` : ''}`,
+      size: 'wide',
+      body: `
+        <div class="kpi-grid tight">
+          <div class="kpi"><div class="label">Resturlaub</div><div class="value">${num2(vacation?.remaining || 0)}</div><div class="foot">Tage</div></div>
+          <div class="kpi"><div class="label">Arbeitszeitkonto</div><div class="value">${Number(overtime?.balance_hours || 0) >= 0 ? '+' : ''}${num2(overtime?.balance_hours || 0)}</div><div class="foot">Stunden</div></div>
+          <div class="kpi"><div class="label">Verträge</div><div class="value">${contracts.length}</div><div class="foot">hinterlegt</div></div>
+        </div>
+        <div class="subcard"><h4>Verträge</h4>
+          ${contracts.length ? `<div class="list-stack">${contracts.map((contract) => `
+            <div class="list-row static"><span class="list-ico">${icon('file')}</span>
+              <span class="list-main"><b>${esc(contract.kind_label)}</b><small>${fmtDate(contract.start_date)}${contract.end_date ? ` – ${fmtDate(contract.end_date)}` : ' · unbefristet'} · ${num2(contract.weekly_hours)} Std./Woche · ${money(contract.salary)}</small></span>
+              ${can('hr.manage') ? `<button class="icon-btn" data-action="edit-employment-contract" data-id="${contract.id}" title="Bearbeiten">${icon('edit')}</button>` : ''}
+            </div>`).join('')}</div>` : '<div class="small muted">Kein Vertrag hinterlegt.</div>'}
+          ${can('hr.manage') ? `<button class="btn sm" style="margin-top:10px" data-action="new-employment-contract" data-employee="${employee.id}">${icon('plus')} Vertrag anlegen</button>` : ''}
+        </div>
+        <div class="subcard"><h4>Dokumente</h4>
+          ${documents.length ? `<div class="list-stack">${documents.map((doc) => `
+            <a class="list-row" href="/api/documents/${doc.id}/file" target="_blank" rel="noopener">
+              <span class="list-ico">${icon('file')}</span>
+              <span class="list-main"><b>${esc(doc.title)}</b><small>${fmtDate(doc.created_at)} · ${esc(doc.category)}</small></span>
+              ${icon('download')}
+            </a>`).join('')}</div>` : '<div class="small muted">Keine Dokumente.</div>'}
+          ${can('documents.manage') ? `<button class="btn sm" style="margin-top:10px" data-action="upload-employee-document" data-id="${employee.id}">${icon('plus')} Dokument ablegen</button>` : ''}
+        </div>
+        <div class="subcard"><h4>Abwesenheiten</h4>
+          ${absences.length ? absences.slice(0, 10).map((row) => `<div class="small" style="padding:3px 0">${fmtDate(row.start_date)} – ${fmtDate(row.end_date)} · ${esc(row.type_label)} · ${esc(row.status_label)}</div>`).join('') : '<div class="small muted">Keine Abwesenheiten.</div>'}
+        </div>`,
+      footer: `<button class="btn" data-action="close-modal">Schließen</button>`,
+    });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function employmentContractForm(contract = null, employeeId = null) {
+  const kinds = state.contractKinds || {
+    unbefristet: 'Unbefristet', befristet: 'Befristet', minijob: 'Minijob',
+    werkstudent: 'Werkstudent', ausbildung: 'Ausbildung', praktikum: 'Praktikum',
+  };
+  formModal({
+    title: contract ? 'Vertrag bearbeiten' : 'Neuer Vertrag',
+    fields: [
+      { name: 'employee_id', label: 'Mitarbeiter', type: 'select', required: true, options: state.employees.map((employee) => ({ value: employee.id, label: employee.name })) },
+      { name: 'kind', label: 'Vertragsart', type: 'select', options: Object.entries(kinds).map(([value, label]) => ({ value, label })) },
+      { name: 'start_date', label: 'Beginn', type: 'date' },
+      { name: 'end_date', label: 'Ende', type: 'date' },
+      { name: 'weekly_hours', label: 'Wochenstunden', type: 'number', step: '0.5', min: 0, default: 40 },
+      { name: 'salary', label: 'Gehalt (€)', type: 'number', step: '0.01', min: 0 },
+      { name: 'notes', label: 'Notizen', type: 'textarea', rows: 2, full: true },
+    ],
+    values: { ...(contract || {}), employee_id: contract?.employee_id ?? employeeId ?? '' },
+    onSubmit: async (values) => {
+      const payload = { ...values, employee_id: Number(values.employee_id) };
+      if (contract) await api.put(`/api/employment-contracts/${contract.id}`, payload);
+      else await api.post('/api/employment-contracts', payload);
+      closeModal();
+      toast('Vertrag gespeichert.');
+      await refresh();
+    },
+  });
+}
+
+async function payrollModal() {
+  const now = new Date();
+  const year = state.payrollYear || now.getFullYear();
+  const month = state.payrollMonth || (now.getMonth() + 1);
+  const data = await api.get(`/api/hr/payroll?year=${year}&month=${month}`);
+  openModal({
+    title: 'Lohnvorbereitung',
+    subtitle: `${data.from} bis ${data.to}`,
+    size: 'xwide',
+    body: `<div class="row" style="gap:8px;margin-bottom:12px">
+        <input id="payroll-year" type="number" value="${year}" style="width:100px" />
+        <input id="payroll-month" type="number" min="1" max="12" value="${month}" style="width:80px" />
+        <button class="btn sm" data-action="load-payroll">${icon('refresh')} Anzeigen</button>
+        <a class="btn sm" href="/api/hr/payroll.csv?year=${year}&month=${month}" target="_blank" rel="noopener">${icon('download')} CSV</a>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Mitarbeiter</th><th>Vertrag</th><th class="right">Netto-Std.</th><th class="right">Soll</th><th class="right">Diff.</th><th class="right">Urlaub</th><th class="right">Krank</th><th class="right">Gehalt</th></tr></thead>
+        <tbody>${data.rows.map((row) => `<tr>
+          <td><b>${esc(row.employee_name)}</b><div class="cell-sub">${esc(row.role || '')}</div></td>
+          <td>${esc(row.contract_kind)}<div class="cell-sub">${num2(row.weekly_hours)} Std./Woche</div></td>
+          <td class="right num">${num2(row.net_hours)}</td>
+          <td class="right num">${num2(row.target_minutes / 60)}</td>
+          <td class="right num" style="color:${row.diff_minutes < 0 ? 'var(--warn)' : 'inherit'}">${row.diff_minutes >= 0 ? '+' : ''}${num2(row.diff_minutes / 60)}</td>
+          <td class="right num">${num2(row.vacation_days)}</td>
+          <td class="right num">${num2(row.sick_days)}</td>
+          <td class="right num">${money(row.salary)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="small muted" style="margin-top:8px">Brutto-Stunden, Pausen und Absenzen werden aus der Zeiterfassung berechnet – die Lohnabrechnung erfolgt im Steuerbüro.</div>`,
+    footer: '<button class="btn" data-action="close-modal">Schließen</button>',
+  });
+}
+
+async function timeCategoriesModal() {
+  const data = await api.get('/api/time-categories?all=1');
+  const categories = data.categories || [];
+  openModal({
+    title: 'Zeitkategorien',
+    subtitle: 'Eigene Kategorien für die Zeiterfassung',
+    body: `<div class="list-stack">${categories.map((category) => `
+      <div class="list-row static">
+        <span class="list-ico">${icon('clock')}</span>
+        <span class="list-main"><b>${esc(category.label)}</b><small>${esc(category.key)}${category.active ? '' : ' · inaktiv'}</small></span>
+        <span class="lr-actions">
+          <button class="icon-btn" data-action="edit-time-category" data-id="${category.id}" title="Bearbeiten">${icon('edit')}</button>
+          <button class="icon-btn" data-action="delete-time-category" data-id="${category.id}" title="Löschen">${icon('trash')}</button>
+        </span>
+      </div>`).join('')}</div>`,
+    footer: `<button class="btn" data-action="close-modal">Schließen</button>
+      <button class="btn primary" data-action="new-time-category">${icon('plus')} Kategorie</button>`,
+  });
+}
+
+function timeCategoryForm(category = null) {
+  formModal({
+    title: category ? 'Kategorie bearbeiten' : 'Neue Zeitkategorie',
+    fields: [
+      { name: 'label', label: 'Bezeichnung', required: true },
+      { name: 'sort', label: 'Sortierung', type: 'number', default: 10 },
+      { name: 'active', label: 'Aktiv', type: 'checkbox', default: true, checkLabel: 'In der Zeiterfassung anzeigen' },
+    ],
+    values: category || {},
+    onSubmit: async (values) => {
+      if (category) await api.put(`/api/time-categories/${category.id}`, values);
+      else await api.post('/api/time-categories', values);
+      closeModal();
+      toast('Kategorie gespeichert.');
+      await timeCategoriesModal();
+    },
+  });
+}
+
+function maternityModal() {
+  formModal({
+    title: 'Mutterschutzfristen',
+    subtitle: 'Schutzfristen aus dem voraussichtlichen Entbindungstermin berechnen',
+    fields: [
+      { name: 'due_date', label: 'Entbindungstermin', type: 'date', required: true },
+      { name: 'weeks_before', label: 'Wochen vor der Geburt', type: 'number', default: 6, min: 0 },
+      { name: 'weeks_after', label: 'Wochen nach der Geburt', type: 'number', default: 8, min: 0 },
+    ],
+    submitLabel: 'Berechnen',
+    onSubmit: async (values) => {
+      const result = await api.get(`/api/hr/maternity?due_date=${encodeURIComponent(values.due_date)}&weeks_before=${values.weeks_before}&weeks_after=${values.weeks_after}`);
+      openModal({
+        title: 'Mutterschutzfristen',
+        body: `<div class="subcard">
+          <div class="meta-grid">
+            <div class="meta-item"><div class="k">Entbindungstermin</div><div class="v">${fmtDate(result.due_date)}</div></div>
+            <div class="meta-item"><div class="k">Schutzfrist beginnt</div><div class="v">${fmtDate(result.protection_start)}</div></div>
+            <div class="meta-item"><div class="k">Schutzfrist endet</div><div class="v">${fmtDate(result.protection_end)}</div></div>
+          </div>
+          <div class="small muted" style="margin-top:10px">${esc(result.note)}</div>
+        </div>`,
+        footer: '<button class="btn" data-action="close-modal">Schließen</button>',
+      });
+    },
+  });
+}
+
+function orderSendDocModal(orderId) {
+  formModal({
+    title: 'Dokument per E-Mail senden',
+    subtitle: 'Auftragsbestätigung, Lieferschein oder Angebot als PDF',
+    fields: [
+      { name: 'type', label: 'Dokument', type: 'select', options: [
+        { value: 'auftragsbestaetigung', label: 'Auftragsbestätigung' },
+        { value: 'lieferschein', label: 'Lieferschein' },
+        { value: 'auftrag', label: 'Auftrag' },
+        { value: 'angebot', label: 'Angebot' },
+      ] },
+      { name: 'to', label: 'E-Mail', type: 'email', placeholder: 'Leer = Kundenadresse', full: true },
+    ],
+    submitLabel: 'Senden',
+    onSubmit: async (values) => {
+      const result = await api.post(`/api/orders/${orderId}/send-document`, values);
+      closeModal();
+      toast(`Dokument an ${result.to} gesendet.`);
+    },
+  });
+}
+
+function progressInvoiceModal(orderId) {
+  formModal({
+    title: 'Abschlagsrechnung',
+    subtitle: 'Teilrechnung zum Auftrag – die Schlussrechnung rechnet die Abschläge ab',
+    fields: [
+      { name: 'percent', label: 'Prozent der Auftragssumme', type: 'number', step: '0.1', min: 0, max: 100, default: 30 },
+      { name: 'amount', label: 'oder Betrag netto (€)', type: 'number', step: '0.01', min: 0, hint: 'Leer lassen, wenn Prozent genutzt wird.' },
+      { name: 'date', label: 'Rechnungsdatum', type: 'date', default: todayISO() },
+      { name: 'notes', label: 'Hinweis', full: true },
+    ],
+    submitLabel: 'Abschlag erstellen',
+    onSubmit: async (values) => {
+      const result = await api.post(`/api/orders/${orderId}/progress-invoice`, {
+        percent: Number(values.percent) || 0,
+        amount: values.amount === '' ? null : Number(values.amount),
+        date: values.date,
+        notes: values.notes,
+      });
+      closeModal();
+      toast(`Abschlagsrechnung ${result.invoice.number} erstellt.`);
+      await refresh();
+    },
+  });
+}
+
 
 const ACTIONS = {
   'toggle-nav': () => $('#sidebar').classList.toggle('open'),
@@ -5460,6 +6102,7 @@ const ACTIONS = {
   'filter-documents': (id, el) => { state.documentsFilter = el.dataset.filter; renderDocuments(); },
   'upload-document': () => uploadDocumentModal(),
   'upload-order-document': (id) => uploadDocumentModal({ order_id: id, category: 'auftrag' }),
+  'upload-employee-document': (id) => uploadDocumentModal({ employee_id: id, category: 'personal' }),
   'open-document': (id) => openDocumentModal(id),
   'document-versions': (id) => newDocumentVersionModal(id),
   'delete-document': async (id) => {
@@ -5790,6 +6433,237 @@ const ACTIONS = {
     }
   },
 
+  /* ------------------------------------------------- Aufgaben & Benachrichtigungen */
+  'filter-tasks': (id, el) => {
+    state.tasksFilter = el.dataset.filter;
+    renderTasks();
+  },
+  'new-task': () => taskForm(),
+  'edit-task': async (id) => {
+    const data = await api.get('/api/tasks');
+    taskForm(data.tasks.find((task) => task.id === Number(id)) || null);
+  },
+  'toggle-task': async (id, el) => {
+    const done = el.dataset.status !== 'erledigt';
+    try {
+      await api.post(`/api/tasks/${id}/done`, { done });
+      toast(done ? 'Aufgabe erledigt.' : 'Aufgabe wieder geöffnet.');
+      await refresh();
+      refreshBadgesOnly();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'delete-task': async (id) => {
+    if (!confirm('Aufgabe löschen?')) return;
+    try {
+      await api.del(`/api/tasks/${id}`);
+      toast('Aufgabe gelöscht.');
+      await refresh();
+      refreshBadgesOnly();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'open-notifications': () => notificationsModal(),
+  'read-notifications': async () => {
+    try {
+      await api.post('/api/notifications/read', {});
+      closeModal();
+      await updateBadges();
+      toast('Benachrichtigungen als gelesen markiert.');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'goto-link': (id, el) => {
+    closeModal();
+    location.hash = el.dataset.link || '#/dashboard';
+  },
+
+  /* --------------------------------------------------------------------- CRM */
+  'new-lead': async () => {
+    await loadLeadMeta();
+    leadForm();
+  },
+  'edit-lead': (id) => editLeadModal(id),
+  'delete-lead': async (id) => {
+    if (!confirm('Anfrage wirklich löschen?')) return;
+    try {
+      await api.del(`/api/leads/${id}`);
+      closeModal();
+      toast('Anfrage gelöscht.');
+      await refresh();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'convert-lead': async (id) => {
+    try {
+      const result = await api.post(`/api/leads/${id}/convert`);
+      closeModal();
+      toast(`Kunde ${result.customer_number || ''} angelegt.`);
+      await refresh();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'lead-link': () => leadLinkModal(),
+  'copy-lead-link': async () => {
+    const input = $('#lead-link');
+    if (!input) return;
+    try {
+      await navigator.clipboard.writeText(input.value);
+      toast('Link kopiert.');
+    } catch {
+      input.select();
+      document.execCommand('copy');
+      toast('Link kopiert.');
+    }
+  },
+  'lead-stages': () => leadStagesModal(),
+  'new-lead-stage': () => leadStageForm(),
+  'edit-lead-stage': async (id) => {
+    await loadLeadMeta();
+    leadStageForm((state.leadStages || []).find((stage) => stage.id === Number(id)) || null);
+  },
+  'delete-lead-stage': async (id) => {
+    if (!confirm('Stufe löschen? Anfragen werden auf die nächste Stufe verschoben.')) return;
+    try {
+      await api.del(`/api/lead-stages/${id}`);
+      state.leadStages = null;
+      toast('Stufe gelöscht.');
+      await renderLeads();
+      await leadStagesModal();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* -------------------------------------------------------------- Kundenportal */
+  'portal-link': async (id) => {
+    try {
+      const data = await api.post(`/api/customers/${id}/portal`);
+      const link = `${location.origin}${data.path}`;
+      openModal({
+        title: 'Kundenportal-Link',
+        subtitle: 'Der Kunde sieht Termine, Aufträge und Rechnungen ohne Anmeldung.',
+        body: `<div class="subcard"><div class="small muted">Link</div>
+          <input id="portal-link-input" readonly value="${esc(link)}" />
+          <div class="small muted" style="margin-top:8px">Weitergabe nur an den Kunden. Der Link kann jederzeit zurückgezogen werden.</div></div>`,
+        footer: `<button class="btn danger" data-action="revoke-portal" data-id="${id}">${icon('trash')} Zurückziehen</button>
+          <button class="btn" data-action="close-modal">Schließen</button>
+          <button class="btn primary" data-action="copy-portal-link">${icon('file')} Kopieren</button>`,
+      });
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'copy-portal-link': async () => {
+    const input = $('#portal-link-input');
+    if (!input) return;
+    try {
+      await navigator.clipboard.writeText(input.value);
+      toast('Portal-Link kopiert.');
+    } catch {
+      input.select();
+      document.execCommand('copy');
+      toast('Portal-Link kopiert.');
+    }
+  },
+  'revoke-portal': async (id) => {
+    if (!confirm('Portal-Link zurückziehen? Der bisherige Link wird ungültig.')) return;
+    try {
+      await api.del(`/api/customers/${id}/portal`);
+      closeModal();
+      toast('Portal-Link zurückgezogen.');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* --------------------------------------------------- Auftragsdokumente & Lager */
+  'order-doc': (id, el) => window.open(`/api/orders/${id}/pdf?type=${el.dataset.type || 'auftrag'}`, '_blank', 'noopener'),
+  'order-send-doc': (id) => orderSendDocModal(id),
+  'order-progress-invoice': (id) => progressInvoiceModal(id),
+  'order-messages': (id) => orderMessagesModal(id),
+  'order-reservations': (id) => orderReservationsModal(id),
+  'order-oci': (id) => window.open(`/api/orders/${id}/oci`, '_blank', 'noopener'),
+  'order-dealer': async (id) => {
+    try {
+      const result = await api.post(`/api/orders/${id}/dealer-order`);
+      toast(result.message || (result.sent ? 'Bestellung gesendet.' : 'OCI-Datei bereit.'));
+      if (result.xml && !result.sent) {
+        const blob = new Blob([result.xml], { type: 'application/xml' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = result.filename || 'Bestellung.xml';
+        anchor.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'toggle-reservation': async (id, el) => {
+    try {
+      await api.put(`/api/reservations/${id}`, { packed: el.dataset.packed !== '1' });
+      await orderReservationsModal(el.dataset.order);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'delete-reservation': async (id, el) => {
+    if (!confirm('Reservierung entfernen?')) return;
+    try {
+      await api.del(`/api/reservations/${id}`);
+      await orderReservationsModal(el.dataset.order);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'invoice-send-mail': async (id) => {
+    try {
+      const result = await api.post(`/api/invoices/${id}/send-mail`);
+      toast(`Rechnung an ${result.to} gesendet.`);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /* --------------------------------------------------------- Personal & Lohn */
+  'employee-file': (id) => employeeFileModal(id),
+  'new-employment-contract': (id, el) => employmentContractForm(null, el.dataset.employee),
+  'edit-employment-contract': async (id) => {
+    const data = await api.get('/api/employment-contracts');
+    state.contractKinds = data.kinds;
+    employmentContractForm(data.contracts.find((contract) => contract.id === Number(id)) || null);
+  },
+  payroll: () => payrollModal(),
+  'load-payroll': async () => {
+    state.payrollYear = Number($('#payroll-year')?.value) || new Date().getFullYear();
+    state.payrollMonth = Number($('#payroll-month')?.value) || 1;
+    await payrollModal();
+  },
+  'time-categories': () => timeCategoriesModal(),
+  'new-time-category': () => timeCategoryForm(),
+  'edit-time-category': async (id) => {
+    const data = await api.get('/api/time-categories?all=1');
+    timeCategoryForm((data.categories || []).find((category) => category.id === Number(id)) || null);
+  },
+  'delete-time-category': async (id) => {
+    if (!confirm('Kategorie löschen? Bereits erfasste Zeiten bleiben erhalten.')) return;
+    try {
+      const result = await api.del(`/api/time-categories/${id}`);
+      toast(result.deactivated ? 'Kategorie ist in Benutzung und wurde deaktiviert.' : 'Kategorie gelöscht.');
+      await timeCategoriesModal();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  maternity: () => maternityModal(),
+
   logout: async () => {
     try { await api.post('/api/auth/logout'); } catch { /* stumm */ }
     stopGeoTracking();
@@ -5855,8 +6729,9 @@ window.addEventListener('hashchange', navigate);
  * ========================================================================== */
 
 const DOCUMENT_CATEGORIES_UI = {
-  rechnung: 'Rechnung', angebot: 'Angebot', auftrag: 'Auftrag', aufmass: 'Aufmaß',
-  foto: 'Foto', protokoll: 'Protokoll', vertrag: 'Vertrag', lieferschein: 'Lieferschein',
+  rechnung: 'Rechnung', angebot: 'Angebot', auftrag: 'Auftrag', auftragsbestaetigung: 'Auftragsbestätigung',
+  aufmass: 'Aufmaß', foto: 'Foto', protokoll: 'Protokoll', vertrag: 'Vertrag',
+  lieferschein: 'Lieferschein', personal: 'Personalakte', lohn: 'Lohn / Gehalt',
   eingangsrechnung: 'Eingangsrechnung', steuer: 'Steuer / Buchhaltung', sonstiges: 'Sonstiges',
 };
 
@@ -5937,10 +6812,11 @@ function uploadDocumentModal(relation = {}) {
         ${relation.order_id ? `<input type="hidden" name="order_id" value="${relation.order_id}" />` : ''}
         ${relation.customer_id ? `<input type="hidden" name="customer_id" value="${relation.customer_id}" />` : ''}
         ${relation.invoice_id ? `<input type="hidden" name="invoice_id" value="${relation.invoice_id}" />` : ''}
+        ${relation.employee_id ? `<input type="hidden" name="employee_id" value="${relation.employee_id}" />` : ''}
         <div class="field full"><label>Datei *</label><input type="file" name="file" required
           accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.xml,.csv,.txt,.eml,.docx,.xlsx,.odt,.ods,.zip" /></div>
         <div class="field"><label>Bezeichnung</label><input name="title" placeholder="z. B. Wartungsprotokoll" /></div>
-        <div class="field"><label>Kategorie</label><select name="category">${categoryOptions(relation.category || 'sonstiges')}</select></div>
+        <div class="field"><label>Kategorie</label><select name="category">${categoryOptions(relation.category || (relation.employee_id ? 'personal' : 'sonstiges'))}</select></div>
         <div class="field full"><label>Notiz</label><textarea name="note" rows="2" placeholder="Optionaler Hinweis zur Ablage"></textarea></div>
       </form>`,
     footer: `
@@ -5966,10 +6842,12 @@ function uploadDocumentModal(relation = {}) {
         order_id: relation.order_id || null,
         customer_id: relation.customer_id || null,
         invoice_id: relation.invoice_id || null,
+        employee_id: relation.employee_id || null,
       });
       closeModal();
       toast('Dokument archiviert.');
       if (relation.order_id) await openOrder(Number(relation.order_id));
+      else if (relation.employee_id) await employeeFileModal(Number(relation.employee_id));
       else await renderDocuments();
     } catch (error) {
       toast(error.message, 'error');
@@ -6934,7 +7812,64 @@ async function inventorySessionModal(id) {
   });
 }
 
+function stopScanCamera() {
+  if (state.scanStream) {
+    state.scanStream.getTracks().forEach((track) => track.stop());
+    state.scanStream = null;
+  }
+}
+
+async function startScanCamera(input, container) {
+  if (!('BarcodeDetector' in window)) {
+    toast('Dieser Browser unterstützt das Scannen mit der Kamera nicht. Bitte Code eingeben.', 'error');
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    toast('Kamera ist nicht verfügbar. Bitte die App über HTTPS öffnen.', 'error');
+    return;
+  }
+  try {
+    stopScanCamera();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } }, audio: false,
+    });
+    state.scanStream = stream;
+    const video = document.createElement('video');
+    video.className = 'scan-video';
+    video.muted = true;
+    video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.srcObject = stream;
+    container.innerHTML = '<div class="small muted" style="margin-bottom:6px">Kamera aktiv – Code in den Rahmen halten.</div>';
+    container.appendChild(video);
+    await video.play();
+    const formats = ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code'];
+    const detector = new BarcodeDetector({ formats });
+    let stopped = false;
+    const tick = async () => {
+      if (stopped || !state.scanStream) return;
+      try {
+        const codes = await detector.detect(video);
+        if (codes.length) {
+          stopped = true;
+          input.value = codes[0].rawValue;
+          stopScanCamera();
+          container.innerHTML = `<div class="notice">Code erkannt: <b>${esc(codes[0].rawValue)}</b></div>`;
+          input.form?.requestSubmit();
+          return;
+        }
+      } catch { /* weiter versuchen */ }
+      setTimeout(tick, 320);
+    };
+    tick();
+  } catch (error) {
+    stopScanCamera();
+    toast(error?.name === 'NotAllowedError' ? 'Kamerazugriff wurde abgelehnt.' : 'Kamera konnte nicht gestartet werden.', 'error');
+  }
+}
+
 function scanArticleModal() {
+  const cameraAvailable = 'BarcodeDetector' in window && Boolean(navigator.mediaDevices?.getUserMedia);
   openModal({
     title: 'Artikel scannen',
     subtitle: 'Barcode, GTIN oder Artikelnummer',
@@ -6947,6 +7882,10 @@ function scanArticleModal() {
           </div>
         </div>
       </form>
+      ${cameraAvailable ? `<div style="margin-top:10px">
+        <button class="btn sm" type="button" id="scan-camera-btn">${icon('camera')} Mit Kamera scannen</button>
+      </div>` : ''}
+      <div id="scan-camera" style="margin-top:10px"></div>
       <div id="scan-result"></div>`,
     footer: `<button class="btn" type="button" data-action="close-modal">Schließen</button>`,
   });
@@ -6992,6 +7931,10 @@ function scanArticleModal() {
     } catch (error) {
       toast(error.message, 'error');
     }
+  });
+  $('#scan-camera-btn')?.addEventListener('click', () => {
+    const form = $('#scan-form');
+    if (form) startScanCamera(form.elements.code, $('#scan-camera'));
   });
 }
 
@@ -7066,7 +8009,7 @@ function einvoiceReferenceModal(invoiceId, buyerReference = '') {
 /* ------------------------------------------------------------------ Init & Anmeldung */
 async function loadBase() {
   const safe = (promise, fallback) => promise.catch(() => fallback);
-  const [settingsResponse, employees, customers, properties, articles, materialData, materialImports] = await Promise.all([
+  const [settingsResponse, employees, customers, properties, articles, materialData, materialImports, timeCategoryData] = await Promise.all([
     api.get('/api/settings'),
     can('employees.view') ? safe(api.get('/api/employees'), []) : [],
     can('customers.view') ? safe(api.get('/api/customers'), []) : [],
@@ -7074,6 +8017,7 @@ async function loadBase() {
     can('warehouse.view') ? safe(api.get('/api/articles'), []) : [],
     can('warehouse.view') ? safe(api.get('/api/materials/sources'), { sources: [] }) : { sources: [] },
     can('warehouse.view') ? safe(api.get('/api/materials/imports?limit=8'), []) : [],
+    safe(api.get('/api/time-categories'), { categories: [] }),
   ]);
   state.settings = settingsResponse.settings;
   state.employees = employees;
@@ -7082,6 +8026,7 @@ async function loadBase() {
   state.articles = articles;
   state.materialSources = materialData?.sources ?? [];
   state.materialImports = Array.isArray(materialImports) ? materialImports : [];
+  state.timeCategories = timeCategoryData?.categories ?? [];
 }
 
 async function refreshBadgesOnly() {
@@ -7149,6 +8094,7 @@ function buildBottomNav() {
   const all = {
     my: { page: 'my', label: 'Mein Tag', ico: 'clock', show: canAny('dashboard.view', 'orders.view.own', 'planning.view') },
     dashboard: { page: 'dashboard', label: 'Übersicht', ico: 'dashboard', show: can('dashboard.view') },
+    tasks: { page: 'tasks', label: 'Aufgaben', ico: 'check', show: can('tasks.view') },
     orders: { page: 'orders', label: 'Aufträge', ico: 'receipt', show: canAny('orders.view.all', 'orders.view.own') },
     reports: { page: 'reports', label: 'Berichte', ico: 'file', show: canAny('reports.own', 'reports.view.all') },
     time: { page: 'time', label: 'Zeiten', ico: 'clock', show: canAny('time.own', 'time.view.all') },
@@ -7157,10 +8103,10 @@ function buildBottomNav() {
     planning: { page: 'planning', label: 'Kalender', ico: 'calendar', show: can('planning.view') },
   };
   const order = isTechnician()
-    ? ['my', 'orders', 'reports', 'time', 'dashboard']
+    ? ['my', 'tasks', 'orders', 'time', 'reports']
     : can('invoices.view')
-      ? ['my', 'dashboard', 'orders', 'planning', 'invoices', 'reports', 'team']
-      : ['my', 'dashboard', 'team', 'reports', 'time', 'orders'];
+      ? ['my', 'dashboard', 'tasks', 'orders', 'invoices', 'planning', 'team']
+      : ['my', 'dashboard', 'tasks', 'team', 'reports', 'orders'];
   const visible = order.map((key) => all[key]).filter((option) => option && option.show).slice(0, 4);
   nav.innerHTML = `
     ${visible.map((option) => `

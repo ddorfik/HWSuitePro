@@ -1453,3 +1453,182 @@ test('Neue Module über HTTP inklusive Rechteprüfung', async () => {
     child.kill();
   }
 });
+
+test('HERO 4–9: Zusammenarbeit, CRM, Portal, Lager und Lohn über HTTP', async () => {
+  const port = 3491;
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, PORT: String(port) },
+    stdio: 'ignore',
+  });
+  const base = `http://127.0.0.1:${port}`;
+  let ready = false;
+  for (let i = 0; i < 50 && !ready; i += 1) {
+    try { ready = (await fetch(`${base}/api/auth/meta`)).ok; } catch { await new Promise((resolve) => setTimeout(resolve, 150)); }
+  }
+  assert.ok(ready, 'Server ist erreichbar');
+
+  const credentials = {};
+  const login = async (username, password) => {
+    const candidates = [
+      credentials[username], password, `${password}-test`, `${password}-test-neu`, `${password}-neu`,
+    ].filter(Boolean);
+    let response = null;
+    for (const candidate of candidates) {
+      response = await fetch(`${base}/api/auth/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password: candidate }),
+      });
+      if (response.ok) break;
+    }
+    assert.equal(response?.status, 200, `Login ${username}`);
+    let cookie = response.headers.get('set-cookie').split(';')[0];
+    let data = await response.json();
+    if (data.user.must_change_password) {
+      const next = `${password}-test-neu2`;
+      const changed = await fetch(`${base}/api/auth/password`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ currentPassword: candidates[candidates.length - 1], newPassword: next }),
+      });
+      assert.equal(changed.status, 200, 'Startpasswort geändert');
+      cookie = changed.headers.get('set-cookie').split(';')[0];
+      credentials[username] = next;
+      data = await changed.json();
+    }
+    return { cookie, data };
+  };
+  const call = (cookie, path, options = {}) => fetch(`${base}${path}`, {
+    ...options,
+    headers: { ...(options.headers || {}), Cookie: cookie },
+  });
+  const json = (response) => response.json();
+  const post = (cookie, path, body) => call(cookie, path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const put = (cookie, path, body) => call(cookie, path, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  try {
+    const chef = await login('chef', 'chef123');
+    const monteur = await login('monteur', 'monteur123');
+    const customer = db.prepare('SELECT * FROM customers ORDER BY id LIMIT 1').get();
+    const article = db.prepare('SELECT * FROM articles ORDER BY id LIMIT 1').get();
+    const employeeId = monteur.data.user.employee_id;
+
+    // Aufgaben: Chef legt zu, Monteur erledigt, Monteur darf nicht anlegen.
+    const task = await json(await post(chef.cookie, '/api/tasks', {
+      title: 'HTTP-Testaufgabe', description: 'Bitte prüfen', employee_id: employeeId,
+    }));
+    assert.equal(task.status, 'offen');
+    assert.ok((await json(await call(chef.cookie, '/api/notifications'))).items.length >= 1);
+    const monteurTasks = await json(await call(monteur.cookie, '/api/tasks'));
+    assert.ok(monteurTasks.tasks.some((row) => row.id === task.id));
+    assert.equal((await post(monteur.cookie, '/api/tasks', { title: 'Verboten' })).status, 403);
+    const done = await json(await post(monteur.cookie, `/api/tasks/${task.id}/done`, { done: true }));
+    assert.equal(done.status, 'erledigt');
+
+    // Nachrichten am Auftrag.
+    const order = await json(await post(chef.cookie, '/api/orders', {
+      customer_id: customer.id,
+      title: 'HERO-HTTP-Auftrag',
+      employee_id: employeeId,
+      items: [{ description: 'Testleistung', quantity: 2, unit: 'Std', unit_price: 50, kind: 'arbeit' }],
+    }));
+    await post(chef.cookie, '/api/messages', { order_id: order.order.id, body: 'Bitte am Montag starten.' });
+    const messages = await json(await call(monteur.cookie, `/api/messages?order_id=${order.order.id}`));
+    assert.equal(messages.messages.length, 1);
+
+    // CRM: Anfrage anlegen, öffentliches Formular, Umwandlung in Kunde.
+    const lead = await json(await post(chef.cookie, '/api/leads', {
+      name: 'Max Mustermann', email: 'max@example.test', phone: '0170 0000000', source: 'telefon', value: 500,
+    }));
+    assert.equal(lead.name, 'Max Mustermann');
+    const token = 'testtoken'.padEnd(48, 'a');
+    await put(chef.cookie, '/api/settings', { lead_token: token });
+    const publicLead = await fetch(`${base}/api/public/leads/${token}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Website Kunde', email: 'website@example.test', message: 'Heizung defekt' }),
+    });
+    assert.equal(publicLead.status, 200);
+    const converted = await json(await post(chef.cookie, `/api/leads/${lead.id}/convert`));
+    assert.equal(converted.created, true);
+    assert.equal((await post(monteur.cookie, '/api/leads', { name: 'Verboten', email: 'x@example.test' })).status, 403);
+
+    // Kundenportal: Link erzeugen, öffentlich lesen, Rechnung als PDF.
+    const portal = await json(await post(chef.cookie, `/api/customers/${customer.id}/portal`));
+    assert.match(portal.path, /^\/portal\//);
+    const portalDoc = await json(await post(chef.cookie, '/api/documents', {
+      customer_id: customer.id,
+      category: 'protokoll',
+      title: 'Portal-Testdokument',
+      filename: 'notiz.txt',
+      mime: 'text/plain',
+      dataUrl: `data:text/plain;base64,${Buffer.from('Portal-Dokument').toString('base64')}`,
+    }));
+    const portalData = await json(await fetch(`${base}/api/public/portal/${portal.token}`));
+    assert.equal(portalData.customer.number, customer.number);
+    assert.ok(portalData.documents.some((doc) => doc.id === portalDoc.id), 'Dokument erscheint im Portal');
+    const portalFile = await fetch(`${base}/api/public/portal/${portal.token}/documents/${portalDoc.id}/file`);
+    assert.equal(portalFile.status, 200);
+    assert.equal(await portalFile.text(), 'Portal-Dokument');
+    assert.equal((await post(monteur.cookie, `/api/customers/${customer.id}/portal`)).status, 403);
+    const customerInvoice = db.prepare('SELECT * FROM invoices WHERE customer_id = ? LIMIT 1').get(customer.id);
+    if (customerInvoice) {
+      const pdf = await fetch(`${base}/api/public/portal/${portal.token}/invoices/${customerInvoice.id}/pdf`);
+      assert.equal(pdf.status, 200);
+      assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString('latin1'), '%PDF-');
+    }
+
+    // Lager: Reservierung, Packliste und OCI-Export.
+    const reservation = await json(await post(chef.cookie, `/api/orders/${order.order.id}/reservations`, {
+      article_id: article.id, quantity: 2,
+    }));
+    assert.equal(reservation.reservations.length, 1);
+    const pack = await json(await call(chef.cookie, `/api/orders/${order.order.id}/packlist`));
+    assert.equal(pack.total_count, 1);
+    const oci = await call(chef.cookie, `/api/orders/${order.order.id}/oci`);
+    assert.equal(oci.status, 200);
+    assert.match(await oci.text(), /ORDER_ITEM/);
+    assert.equal((await post(monteur.cookie, `/api/orders/${order.order.id}/reservations`, {
+      article_id: article.id, quantity: 1,
+    })).status, 403, 'Monteure dürfen keine Reservierungen anlegen');
+
+    // Abschlagsrechnung und Dokumente.
+    const progress = await json(await post(chef.cookie, `/api/orders/${order.order.id}/progress-invoice`, { percent: 30 }));
+    assert.equal(progress.invoice.kind, 'abschlag');
+    assert.ok(Number(progress.invoice.total) > 0);
+    const confirmation = await call(chef.cookie, `/api/orders/${order.order.id}/pdf?type=auftragsbestaetigung`);
+    assert.equal(confirmation.status, 200);
+    const delivery = await call(chef.cookie, `/api/orders/${order.order.id}/pdf?type=lieferschein`);
+    assert.equal(delivery.status, 200);
+    const gaeb84 = await call(chef.cookie, `/api/orders/${order.order.id}/gaeb?format=x84`);
+    assert.equal(gaeb84.status, 200);
+    assert.match(await gaeb84.text(), /DA84/);
+
+    // Personal: Verträge, Lohnvorbereitung, Zeitkategorien und Rechte.
+    const contract = await json(await post(chef.cookie, '/api/employment-contracts', {
+      employee_id: employeeId, kind: 'unbefristet', start_date: '2026-01-01', weekly_hours: 40, salary: 3200,
+    }));
+    assert.equal(contract.employee_id, employeeId);
+    assert.equal((await call(monteur.cookie, '/api/employment-contracts')).status, 403);
+    assert.equal((await call(monteur.cookie, '/api/hr/payroll')).status, 403);
+    const payroll = await json(await call(chef.cookie, '/api/hr/payroll?year=2026&month=11'));
+    assert.ok(Array.isArray(payroll.rows));
+    const payrollCsv = await call(chef.cookie, '/api/hr/payroll.csv?year=2026&month=11');
+    assert.equal(payrollCsv.status, 200);
+    assert.match(await payrollCsv.text(), /Mitarbeiter/);
+    const categories = await json(await call(monteur.cookie, '/api/time-categories'));
+    assert.ok(categories.categories.length >= 5);
+    assert.equal((await post(monteur.cookie, '/api/time-categories', { label: 'Verboten' })).status, 403);
+    const maternity = await json(await call(chef.cookie, '/api/hr/maternity?due_date=2026-12-01'));
+    assert.ok(maternity.protection_start < maternity.due_date);
+
+    // Lexware-Export.
+    const lexware = await call(chef.cookie, '/api/finance/lexware');
+    assert.equal(lexware.status, 200);
+    assert.match(await lexware.text(), /Belegnr/);
+  } finally {
+    child.kill();
+  }
+});

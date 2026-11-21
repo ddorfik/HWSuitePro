@@ -59,18 +59,26 @@ API-Aufruf** geprüft. Das Frontend blendet zusätzlich nicht erlaubte Bereiche 
 | Aufträge | alle | alle | alle | **nur eigene** | – |
 | Preise / Rechnungen | ✓ | ✓ | ✓ | – | – |
 | E-Rechnung | ✓ | ✓ | ✓ | – | – |
-| Dokumente (DMS) | ✓ | ✓ | ✓ | – | – |
+| Dokumente (DMS) | ✓ | ✓ | ✓ | – | ✓ |
 | Finanzen (DATEV/Bank/SEPA) | ✓ | ✓ | ✓ | – | – |
 | Kalkulation | ✓ | ✓ | ✓ | – | – |
 | Kunden & Objekte | ✓ | ✓ | ✓ | eigene Kunden | – |
+| Anfragen / CRM-Pipeline | ✓ | ✓ | ✓ | – | – |
+| Kundenportal-Links | ✓ | ✓ | ✓ | – | – |
+| Aufgaben & Pinnwand | ✓ | ✓ | ✓ | eigene | ✓ |
+| Nachrichten | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Planung & Plantafel | ✓ | ✓ | ✓ | eigene Termine | – |
 | Lager | ✓ | ✓ | ✓ | nur Bestand | – |
+| Materialreservierung / Packliste | ✓ | ✓ | ✓ | lesen | – |
 | Inventur | ✓ | ✓ | ✓ | – | – |
 | Berichte | alle | alle + Freigabe | alle | **nur eigene** | alle (lesen) |
 | Fotos | alle | alle | alle | eigene Aufträge | – |
 | Zeiten | alle | alle | alle | **nur eigene** | alle |
 | GPS-Zeiterfassung | ✓ | ✓ | ✓ | **nur eigene** | ✓ (eigene) |
 | Urlaub & Arbeitszeit | ✓ | ✓ | Anträge lesen | **eigener Antrag** | ✓ |
+| Personalakte & Verträge | ✓ | ✓ | – | eigene Person | ✓ |
+| Lohnvorbereitung | ✓ | ✓ | – | – | ✓ |
+| Zeitkategorien | ✓ | ✓ | lesen | lesen | ✓ |
 | Mitarbeiter | ✓ | ✓ | lesen | lesen | ✓ |
 | Textassistent | ✓ | ✓ | ✓ | – | ✓ |
 | Benutzerkonten | ✓ | – | – | – | – |
@@ -253,6 +261,34 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 - **Arbeitszeitkonto** mit Wochenvergleich (Ist/Soll), Korrekturbuchungen und Saldo
 - Eigene Konten für Mitarbeiter, Gesamtübersicht für HR; Integriert in `#/team`
 
+### Zusammenarbeit: Aufgaben, Pinnwand & Benachrichtigungen
+
+- **Aufgaben** mit Titel, Beschreibung, Fälligkeit, Priorität und Zuständigkeit – am Auftrag oder frei
+- Monteure sehen und erledigen ihre eigenen Aufgaben; Büro und Chef verteilen sie
+- **Benachrichtigungsglocke** für neue Aufgaben, Anfragen, Nachrichten und Terminrückmeldungen
+- **Pinnwand / Team-Feed** auf Basis des Aktivitätsprotokolls
+- **Nachrichten je Auftrag** zwischen Büro und Monteur, inklusive Push-freier Hinweise in der App
+
+### Anfragen & Kundenportal (CRM)
+
+- **Anfrage-Pipeline** mit konfigurierbaren Stufen (Neu, Kontaktiert, Angebot, Gewonnen, Verloren)
+- Quellen: Website, Portale, Telefon, Empfehlung; Wert und interne Notizen je Anfrage
+- **Öffentliches Anfrageformular** unter `/anfrage/<Token>` ohne Anmeldung
+- Anfrage mit einem Klick in einen **Kunden** umwandeln
+- **Kundenportal** unter `/portal/<Token>`: Termine, Aufträge, Rechnungen als PDF und Dokumente;
+  Nachrichten an das Büro; Link jederzeit zurückziehbar
+
+### Personal-Erweiterung: Verträge, Pausen & Lohnvorbereitung
+
+- **Arbeitsverträge** (unbefristet, befristet, Minijob, Werkstudent, Ausbildung, Praktikum) mit
+  Wochenstunden und Gehalt; Personalakte je Mitarbeiter inklusive Dokumenten
+- **Pausenautomatik** nach § 4 ArbZG: 30 Minuten ab 6 Stunden, 45 Minuten ab 9 Stunden
+  (einstellbar, standardmäßig aus)
+- **Zeitkategorien** frei erweiterbar (Arbeit, Fahrt, Urlaub, Krank, Schule …)
+- **Lohnvorbereitung** je Monat mit Brutto-/Netto-Stunden, Pausen, Soll/Ist, Urlaub, Krankheit und
+  Gehalt; CSV-Export für das Steuerbüro
+- **Mutterschutzfristen** aus dem Entbindungstermin berechnen
+
 ### Finanzen: DATEV, Bankabgleich & SEPA
 
 - **Bankimport** aus CSV (gängige Spaltennamen) und **CAMT.053**; Duplikate werden übersprungen
@@ -281,10 +317,28 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 - Erst der Abschluss bucht die Differenzen als Lagerkorrektur – abgeschlossene Inventuren
   bleiben aus Nachvollziehbarkeitsgründen erhalten
 
+### Lager: Reservierungen, Packliste & Händlerbestellung
+
+- Material je Auftrag **reservieren**; der verfügbare Bestand wird um offene Reservierungen reduziert
+- **Packliste** mit Abhaken je Position, direkt aus dem Auftrag
+- **OCI-Bestellung** als XML exportieren oder – bei konfiguriertem Händler – direkt senden
+  (HTTPS, Bearer/Basic/API-Key; ohne Zugangsdaten bleibt der XML-Download)
+- Bestandsanzeige in der Artikelliste mit `reserved` und `available`
+
+### Dokumente & Auftragsdokumente
+
+- **Auftragsbestätigung** und **Lieferschein** als PDF direkt aus dem Auftrag (Lieferschein ohne Preise)
+- **Abschlagsrechnung** mit Prozent oder Betrag; die Schlussrechnung zieht alle Abschläge ab
+- **E-Mail-Versand mit PDF-Anhang** für Rechnung, Angebot, Auftragsbestätigung und Lieferschein
+- Dokumentenarchiv mit Kategorie **Personalakte**, Mitarbeiterzuordnung und Zugriff über die Personalakte
+
 ### Schnittstellen & Textassistent
 
 - **GAEB X83 (DA83)**: Export des Leistungsverzeichnisses und Import von Positionen
-- **OCI-Bestellung** (BMEcat/OCI-XML) vom Lieferanten direkt in den Auftrag übernehmen
+- **GAEB X84 (DA84)**: Kostenanschlag mit Mengen und Preisen
+- **OCI-Bestellung** (BMEcat/OCI-XML) vom Lieferanten direkt in den Auftrag übernehmen und
+  als Bestellung exportieren
+- **Lexware-CSV** für die Buchhaltung (Belegnummer, Datum, Netto/USt/Brutto, offen)
 - **Webhooks**: signierte JSON-Ereignisse (`X-HandwerkPro-Signature`, HMAC-SHA256) für Aufträge,
   Rechnungen, Zahlungen, Kunden, Dokumente und freigegebene Berichte. Nur HTTPS, private
   Netzziele und Zugangsdaten in der URL sind gesperrt, Timeout 5 Sekunden
@@ -515,14 +569,17 @@ GasWasserPro/
 │   ├── dms.js              Dokumentenarchiv, Versionen, GoBD-Verlauf
 │   ├── calc.js             Kalkulation und Nachkalkulation
 │   ├── resources.js        Plantafel und Ressourcenbuchungen
-│   ├── hr.js               Urlaub, Abwesenheiten und Arbeitszeitkonten
+│   ├── hr.js               Urlaub, Abwesenheiten, Verträge, Pausen, Lohnvorbereitung
+│   ├── collab.js           Aufgaben, Nachrichten, Benachrichtigungen, Pinnwand
+│   ├── crm.js              Anfragen-Pipeline, öffentliches Formular, Kundenportal
+│   ├── warehouse.js        Reservierungen, Packliste, OCI, Händlerbestellung
 │   ├── geo.js              GPS-Zeiterfassung, Geofencing und Standortprüfung
 │   ├── finance.js          Bankimport, DATEV und SEPA
 │   ├── site.js             Aufmaß, Checklisten, Bautagebuch, Unterschrift
 │   ├── inventory.js        Inventur und Artikel-Scan
-│   ├── interfaces.js       GAEB, OCI, Webhooks, OpenAPI
+│   ├── interfaces.js       GAEB X83/X84, OCI, Lexware, Webhooks, OpenAPI
 │   ├── assistant.js        Lokaler Textassistent
-│   ├── documents.js        Layout von Rechnung, Mahnung, Auftrag, Angebot
+│   ├── documents.js        Layout von Rechnung, Abschlag, Auftrag, Bestätigung, Lieferschein
 │   └── pdf.js              PDF-Generator inkl. eingebetteter Dateien (ZUGFeRD)
 ├── public/
 │   ├── index.html          App-Gerüst, Login, Navigation
@@ -534,6 +591,8 @@ GasWasserPro/
 │   ├── icon-512.png
 │   ├── apple-touch-icon.png
 │   ├── termin.html         Öffentliche Terminbestätigung für Kunden (/termin/<token>)
+│   ├── anfrage.html        Öffentliches Anfrageformular (/anfrage/<token>)
+│   ├── portal.html         Kundenportal (/portal/<token>)
 │   └── sw.js               Service Worker
 ├── test/smoke.test.js      Tests
 ├── scripts/reset.js        Demo-Daten zurücksetzen
@@ -690,6 +749,56 @@ POST   /api/contracts/:id/order       Auftrag aus Vertrag erzeugen
 GET    /api/users                     Benutzerkonten (Chef)
 POST   /api/automation/run            Automatik sofort ausführen
 GET    /api/export/rechnungen.csv     CSV-Export (auch auftraege, kunden, lager)
+
+GET    /api/tasks                     Aufgaben (Monteur: nur eigene)
+POST   /api/tasks                     Aufgabe anlegen (Chef/Büro/Vorgesetzte)
+PUT    /api/tasks/:id                 Aufgabe bearbeiten
+POST   /api/tasks/:id/done            Aufgabe erledigen/wieder öffnen
+DELETE /api/tasks/:id                 Aufgabe löschen
+GET    /api/messages?order_id=…       Nachrichten (optional je Auftrag)
+POST   /api/messages                  Nachricht senden
+GET    /api/notifications             Benachrichtigungen (Filter: unread=1)
+POST   /api/notifications/read        Als gelesen markieren
+GET    /api/feed                      Aktivitäts-Feed / Pinnwand
+
+GET    /api/leads                     Anfragen/Leads inkl. Stufen und Quellen
+POST   /api/leads                     Anfrage anlegen
+PUT    /api/leads/:id                 Anfrage bearbeiten
+POST   /api/leads/:id/convert         Anfrage in Kunde umwandeln
+GET    /api/lead-stages               Pipeline-Stufen
+POST   /api/leads/token               Token für das öffentliche Formular erzeugen
+POST   /api/public/leads/:token       Öffentlich: Anfrage senden
+POST   /api/customers/:id/portal      Kundenportal-Link erzeugen
+DELETE /api/customers/:id/portal      Kundenportal-Link zurückziehen
+GET    /api/public/portal/:token      Öffentlich: Portalübersicht
+GET    /api/public/portal/:token/invoices/:id/pdf   Öffentlich: Rechnung als PDF
+GET    /api/public/portal/:token/documents/:id/file Öffentlich: Dokument
+POST   /api/public/portal/:token/messages            Öffentlich: Nachricht an das Büro
+
+GET    /api/orders/:id/pdf?type=…     PDF: auftrag, angebot, auftragsbestaetigung, lieferschein
+POST   /api/orders/:id/send-document  Auftragsdokument per E-Mail senden
+POST   /api/orders/:id/progress-invoice   Abschlagsrechnung (percent oder amount)
+POST   /api/invoices/:id/send-mail    Rechnung mit PDF-Anhang per E-Mail senden
+GET    /api/orders/:id/gaeb?format=x84    GAEB-X84-Export
+GET    /api/orders/:id/oci            OCI-Bestellung exportieren
+
+GET    /api/orders/:id/reservations   Materialreservierungen
+POST   /api/orders/:id/reservations   Material reservieren
+PUT    /api/reservations/:id          Menge ändern / abhaken
+DELETE /api/reservations/:id          Reservierung entfernen
+GET    /api/orders/:id/packlist       Packliste
+POST   /api/orders/:id/dealer-order   Händlerbestellung senden oder XML liefern
+
+GET    /api/employment-contracts      Arbeitsverträge (hr.manage/hr.payroll)
+POST   /api/employment-contracts      Vertrag anlegen
+PUT    /api/employment-contracts/:id  Vertrag bearbeiten
+GET    /api/hr/payroll                Lohnvorbereitung (Jahr/Monat)
+GET    /api/hr/payroll.csv            Lohnvorbereitung als CSV
+GET    /api/hr/maternity?due_date=…   Mutterschutzfristen
+GET    /api/employees/:id/file        Personalakte (HR oder eigene Person)
+GET    /api/time-categories           Zeitkategorien
+POST   /api/time-categories           Zeitkategorie anlegen (HR)
+GET    /api/finance/lexware           Lexware-CSV-Export
 ```
 
 ---

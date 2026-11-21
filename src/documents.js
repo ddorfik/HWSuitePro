@@ -54,7 +54,7 @@ function header(doc, settings, { label, number, subtitle, info = [], recipient, 
   doc.text(`${settings.company_street} · ${settings.company_zip} ${settings.company_city}`, ML, 81, { size: 8.5, color: GREY });
   doc.text(`Tel. ${settings.company_phone} · ${settings.company_email}`, ML, 92, { size: 8.5, color: GREY });
 
-  doc.textRight(label, RIGHT, 52, { size: 20, bold: true, color: PETROL });
+  doc.textRight(label, RIGHT, 52, { size: label.length > 14 ? 15 : 20, bold: true, color: PETROL });
   if (number) doc.textRight(number, RIGHT, 68, { size: 11, color: INK });
 
   let infoY = 96;
@@ -87,14 +87,16 @@ function tableHeader(doc, y, columns, { fill = PETROL, color = '#ffffff' } = {})
   return y + 22;
 }
 
-function itemTable(doc, settings, items, startY) {
+function itemTable(doc, settings, items, startY, { showPrices = true } = {}) {
   const cols = [
     { key: 'pos', label: 'Pos.', x: ML + 6 },
     { key: 'desc', label: 'Beschreibung', x: ML + 34 },
     { key: 'qty', label: 'Menge', x: 352, align: 'right' },
     { key: 'unit', label: 'Einheit', x: 362 },
-    { key: 'price', label: 'Einzelpreis', x: 455, align: 'right' },
-    { key: 'total', label: 'Gesamt', x: RIGHT - 6, align: 'right' },
+    ...(showPrices ? [
+      { key: 'price', label: 'Einzelpreis', x: 455, align: 'right' },
+      { key: 'total', label: 'Gesamt', x: RIGHT - 6, align: 'right' },
+    ] : []),
   ];
   let y = tableHeader(doc, startY, cols);
   let page = 1;
@@ -116,8 +118,10 @@ function itemTable(doc, settings, items, startY) {
     doc.text(String(index + 1), ML + 6, y + 13, { size: 9.5, color: GREY });
     doc.textRight(deNumber(item.quantity, 2), 352, y + 13, { size: 9.5 });
     doc.text(item.unit || '', 362, y + 13, { size: 9.5, color: GREY });
-    doc.textRight(euro(item.unit_price), 455, y + 13, { size: 9.5 });
-    doc.textRight(euro(item.quantity * item.unit_price), RIGHT - 6, y + 13, { size: 9.5, bold: true });
+    if (showPrices) {
+      doc.textRight(euro(item.unit_price), 455, y + 13, { size: 9.5 });
+      doc.textRight(euro(item.quantity * item.unit_price), RIGHT - 6, y + 13, { size: 9.5, bold: true });
+    }
     doc.line(ML, y + rowHeight, RIGHT, y + rowHeight, { color: LINE, width: 0.4 });
     y += rowHeight;
   });
@@ -181,9 +185,12 @@ function closing(doc, y, settings) {
 
 export function renderInvoicePdf(data) {
   const { settings, invoice, customer, property, items, order, dunning } = data;
-  const doc = new PDF({ title: `Rechnung ${invoice.number}`, author: settings.company_name });
+  const docLabel = invoice.kind === 'abschlag' ? 'Abschlagsrechnung' : 'Rechnung';
+  const doc = new PDF({ title: `${docLabel} ${invoice.number}`, author: settings.company_name });
   const isDunning = Boolean(dunning);
-  const label = isDunning ? (dunning.level > 1 ? `${dunning.level}. Mahnung` : 'Zahlungserinnerung') : 'RECHNUNG';
+  const label = isDunning
+    ? (dunning.level > 1 ? `${dunning.level}. Mahnung` : 'Zahlungserinnerung')
+    : (invoice.kind === 'abschlag' ? 'ABSCHLAGSRECHNUNG' : 'RECHNUNG');
 
   const info = [
     { label: 'Rechnungsnr.', value: invoice.number },
@@ -292,16 +299,26 @@ export function renderInvoicePdf(data) {
   return doc.build();
 }
 
+const ORDER_DOC_TYPES = {
+  angebot: { label: 'ANGEBOT', title: 'Angebot', numberLabel: 'Angebotsnr.' },
+  auftrag: { label: 'AUFTRAG', title: 'Auftrag', numberLabel: 'Auftragsnr.' },
+  auftragsbestaetigung: { label: 'AUFTRAGSBESTÄTIGUNG', title: 'Auftragsbestätigung', numberLabel: 'Auftragsnr.' },
+  lieferschein: { label: 'LIEFERSCHEIN', title: 'Lieferschein', numberLabel: 'Lieferscheinnr.' },
+};
+
 export function renderOrderPdf(data) {
   const { settings, order, customer, property, employee, items, docType = 'auftrag' } = data;
-  const isQuote = docType === 'angebot';
+  const kind = ORDER_DOC_TYPES[docType] ? docType : 'auftrag';
+  const meta = ORDER_DOC_TYPES[kind];
+  const isQuote = kind === 'angebot';
+  const isDelivery = kind === 'lieferschein';
   const doc = new PDF({
-    title: `${isQuote ? 'Angebot' : 'Auftrag'} ${order.number}`,
+    title: `${meta.title} ${order.number}`,
     author: settings.company_name,
   });
 
   const info = [
-    { label: isQuote ? 'Angebotsnr.' : 'Auftragsnr.', value: order.number },
+    { label: meta.numberLabel, value: order.number },
     { label: 'Datum', value: deDate(order.created_at) },
     { label: 'Kundennr.', value: customer.number },
   ];
@@ -310,9 +327,9 @@ export function renderOrderPdf(data) {
   if (property) info.push({ label: 'Objekt', value: property.label });
 
   let y = header(doc, settings, {
-    label: isQuote ? 'ANGEBOT' : 'AUFTRAG',
+    label: meta.label,
     number: null,
-    subtitle: `${isQuote ? 'Angebot' : 'Auftrag'} ${order.number} · ${order.title}`,
+    subtitle: `${meta.title} ${order.number} · ${order.title}`,
     info,
     recipient: customer,
   });
@@ -321,18 +338,33 @@ export function renderOrderPdf(data) {
     y = doc.paragraph(order.description, ML, y, CONTENT, { size: 9.5, lineHeight: 13 }) + 10;
   }
 
-  const table = itemTable(doc, settings, items, y + 6);
+  if (kind === 'auftragsbestaetigung') {
+    y = doc.paragraph(
+      'vielen Dank für Ihren Auftrag. Wir bestätigen die Ausführung der nachstehend aufgeführten Leistungen zu den vereinbarten Konditionen.',
+      ML, y, CONTENT, { size: 9.5, lineHeight: 13 }
+    ) + 10;
+  } else if (isDelivery) {
+    y = doc.paragraph(
+      'wir liefern Ihnen die nachstehend aufgeführten Positionen. Die Berechnung erfolgt separat mit der Rechnung.',
+      ML, y, CONTENT, { size: 9.5, lineHeight: 13 }
+    ) + 10;
+  }
+
+  const table = itemTable(doc, settings, items, y + 6, { showPrices: !isDelivery });
   y = table.y;
-  const round2 = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
-  const net = round2(items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0));
-  const tax = round2((net * order.tax_rate) / 100);
-  y = totalsBlock(doc, y, {
-    subtotal: net,
-    tax,
-    total: round2(net + tax),
-    taxRate: order.tax_rate,
-    label: isQuote ? 'Gesamtbetrag' : 'Auftragssumme',
-  });
+
+  if (!isDelivery) {
+    const round2 = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+    const net = round2(items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0));
+    const tax = round2((net * order.tax_rate) / 100);
+    y = totalsBlock(doc, y, {
+      subtotal: net,
+      tax,
+      total: round2(net + tax),
+      taxRate: order.tax_rate,
+      label: isQuote ? 'Gesamtbetrag' : 'Auftragssumme',
+    });
+  }
 
   if (property && (property.street || property.city)) {
     y += 16;
@@ -342,6 +374,16 @@ export function renderOrderPdf(data) {
         `${property.label} · ${property.street}, ${property.zip} ${property.city}`,
         ML, y + 13, { size: 9, color: '#374151' }
       );
+    }
+  }
+
+  if (isDelivery) {
+    y += 34;
+    if (y < H - 120) {
+      doc.text('Ware erhalten am / Unterschrift Empfänger', ML, y, { size: 8.5, color: GREY });
+      doc.line(ML, y + 34, 280, y + 34, { color: '#9ca3af' });
+      doc.text('Ort, Datum', 320, y, { size: 8.5, color: GREY });
+      doc.line(320, y + 34, RIGHT, y + 34, { color: '#9ca3af' });
     }
   }
 
