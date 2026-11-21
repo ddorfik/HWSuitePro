@@ -10,7 +10,7 @@ const directory = mkdtempSync(join(tmpdir(), 'handwerkpro-test-'));
 process.env.GASWASSER_DATA = directory;
 process.env.GASWASSER_DB = join(directory, 'test.db');
 
-const { db, invoiceTotals, getSettings } = await import('../src/db.js');
+const { db, invoiceTotals, getSettings, todayISO } = await import('../src/db.js');
 const billing = await import('../src/billing.js');
 const { runAutomation } = await import('../src/automation.js');
 const { verifyPassword } = await import('../src/password.js');
@@ -26,6 +26,7 @@ const site = await import('../src/site.js');
 const inventory = await import('../src/inventory.js');
 const interfaces = await import('../src/interfaces.js');
 const resources = await import('../src/resources.js');
+const geo = await import('../src/geo.js');
 
 const invoiceCount = () => db.prepare('SELECT COUNT(*) AS n FROM invoices').get().n;
 
@@ -1064,6 +1065,89 @@ test('Plantafel zeigt beantragten und genehmigten Urlaub', () => {
   assert.ok(board.absences.every((row) => row.status !== 'abgelehnt'), 'Abgelehnter Urlaub wird ausgeblendet');
 });
 
+test('GPS-Zeiterfassung startet und stoppt Zeit an Baustelle und Zuhause', () => {
+  const user = db.prepare("SELECT * FROM users WHERE username = 'vorgesetzt'").get();
+  assert.ok(user?.employee_id, 'Vorgesetzter ist einem Mitarbeiter zugeordnet');
+  db.prepare("UPDATE time_entries SET end_at = datetime('now') WHERE user_id = ? AND end_at IS NULL").run(user.id);
+  const order = db.prepare(
+    `SELECT o.id FROM orders o JOIN properties p ON p.id = o.property_id
+     WHERE o.employee_id = ? AND o.doc_type = 'auftrag'
+       AND o.status NOT IN ('erledigt', 'abgerechnet', 'storniert')
+     ORDER BY o.id LIMIT 1`
+  ).get(user.employee_id);
+  assert.ok(order, 'Aktiver Auftrag mit Objekt vorhanden');
+
+  const home = { latitude: 51.2277, longitude: 6.7735 };
+  const site = { latitude: 51.2280, longitude: 6.7740 };
+  geo.setHomeLocation(user, { ...home, accuracy: 8 });
+  geo.setOrderLocation(user, order.id, site);
+  geo.updateGeoSettings(user, { enabled: true, radius_m: 150 });
+
+  assert.ok(geo.distanceMeters(home.latitude, home.longitude, 50.9375, 6.9603) > 30000);
+
+  const entered = geo.geoEvent(user, {
+    kind: 'order_enter', order_id: order.id, latitude: site.latitude, longitude: site.longitude, accuracy: 10,
+  });
+  assert.equal(entered.started, true);
+  assert.equal(entered.time.order_id, order.id);
+  assert.equal(entered.time.source, 'gps');
+  assert.equal(db.prepare('SELECT end_at FROM time_entries WHERE id = ?').get(entered.time.id).end_at, null);
+
+  const duplicate = geo.geoEvent(user, {
+    kind: 'order_enter', order_id: order.id, latitude: site.latitude, longitude: site.longitude, accuracy: 10,
+  });
+  assert.equal(duplicate.duplicate, true, 'Doppeltes Ereignis wird nicht doppelt gebucht');
+
+  assert.throws(() => geo.geoEvent(user, {
+    kind: 'order_enter', order_id: order.id, latitude: 52.5, longitude: 7.0, accuracy: 10,
+  }), /entfernt/, 'Zu weit entfernte Position wird abgelehnt');
+
+  const exited = geo.geoEvent(user, {
+    kind: 'order_exit', order_id: order.id, latitude: 51.24, longitude: 6.79, accuracy: 10,
+  });
+  assert.equal(exited.stopped, true);
+  assert.ok(db.prepare('SELECT end_at FROM time_entries WHERE id = ?').get(entered.time.id).end_at);
+  assert.ok(exited.time && exited.time.end_at === null, 'Nach der Abfahrt läuft die Wegezeit weiter');
+  assert.equal(exited.time.order_id, null);
+
+  const homeAgain = geo.geoEvent(user, {
+    kind: 'home_enter', latitude: home.latitude, longitude: home.longitude, accuracy: 10,
+  });
+  assert.equal(homeAgain.stopped, true);
+  assert.equal(homeAgain.time, null);
+
+  const leftHome = geo.geoEvent(user, {
+    kind: 'home_exit', latitude: 51.24, longitude: 6.79, accuracy: 10,
+  });
+  assert.equal(leftHome.started, true);
+  assert.equal(leftHome.time.order_id, null);
+
+  // 30-Sekunden-Schutz gegen doppelte Ereignisse im Test zurücksetzen.
+  db.prepare('DELETE FROM geo_time_events WHERE user_id = ?').run(user.id);
+  const backHome = geo.geoEvent(user, {
+    kind: 'home_enter', latitude: home.latitude, longitude: home.longitude, accuracy: 10,
+  });
+  assert.equal(backHome.stopped, true);
+
+  const absence = hr.createAbsence({
+    employee_id: user.employee_id,
+    type: 'urlaub',
+    start_date: todayISO(),
+    end_date: todayISO(),
+    status: 'genehmigt',
+  }, 1);
+  const paused = geo.geoEvent(user, {
+    kind: 'home_exit', latitude: 51.24, longitude: 6.79, accuracy: 10,
+  });
+  assert.equal(paused.skipped, true, 'Genehmigte Abwesenheit pausiert die Automatik');
+  hr.deleteAbsence(absence.id);
+
+  geo.updateGeoSettings(user, { enabled: false, radius_m: 150 });
+  assert.throws(() => geo.geoEvent(user, {
+    kind: 'home_exit', latitude: 51.24, longitude: 6.79, accuracy: 10,
+  }), /ausgeschaltet/);
+});
+
 test('Finanzen: Bankimport mit Duplikatfilter, DATEV, IBAN und SEPA', () => {
   const invoice = db.prepare("SELECT * FROM invoices WHERE status IN ('offen','teilweise','gemahnt') ORDER BY id LIMIT 1").get();
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(invoice.customer_id);
@@ -1301,11 +1385,70 @@ test('Neue Module über HTTP inklusive Rechteprüfung', async () => {
     const ownAccount = await json(await call(monteur.cookie, '/api/hr/accounts'));
     assert.equal(ownAccount.employees, undefined, 'Monteure sehen keine fremden Personalkonten');
     assert.ok(ownAccount.vacation);
+    const employeeList = await json(await call(monteur.cookie, '/api/employees'));
+    const otherEmployee = employeeList.find((row) => row.id !== monteur.data.user.employee_id);
+    assert.equal(otherEmployee.home_lat, undefined, 'Fremde Hausanschrift wird nicht ausgeliefert');
+    const ownOrderDetail = await json(await call(monteur.cookie, `/api/orders/${db.prepare(
+      "SELECT id FROM orders WHERE employee_id = ? AND doc_type = 'auftrag' ORDER BY id LIMIT 1"
+    ).get(monteur.data.user.employee_id).id}`));
+    if (ownOrderDetail.employee) {
+      assert.equal(ownOrderDetail.employee.home_lat, undefined, 'Hausanschrift nicht in Auftragsdetails');
+    }
+
+    // GPS-Zeiterfassung: eigene Standorte setzen und Zeit automatisch schalten.
+    const geoOrder = db.prepare(
+      `SELECT o.id FROM orders o JOIN properties p ON p.id = o.property_id
+       WHERE o.employee_id = ? AND o.doc_type = 'auftrag'
+         AND o.status NOT IN ('erledigt', 'abgerechnet', 'storniert')
+       ORDER BY o.id LIMIT 1`
+    ).get(monteur.data.user.employee_id);
+    assert.ok(geoOrder, 'Monteur hat einen aktiven Auftrag mit Objekt');
+    db.prepare('DELETE FROM geo_time_events WHERE user_id = ?').run(monteur.data.user.id);
+    const put = (cookie, path, body) => call(cookie, path, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    await put(monteur.cookie, '/api/geo/settings', { enabled: false, radius_m: 150 });
+    const geoStatus = await json(await call(monteur.cookie, '/api/geo/status'));
+    assert.equal(geoStatus.enabled, false);
+    const geoEnabled = await json(await put(monteur.cookie, '/api/geo/settings', { enabled: true, radius_m: 150 }));
+    assert.equal(geoEnabled.enabled, true);
+    const geoHome = await json(await put(monteur.cookie, '/api/geo/home', {
+      latitude: 51.2277, longitude: 6.7735, accuracy: 8,
+      home_street: 'Testweg 1', home_zip: '40210', home_city: 'Düsseldorf',
+    }));
+    assert.equal(geoHome.home.latitude, 51.2277);
+    const geoLocation = await json(await put(monteur.cookie, `/api/orders/${geoOrder.id}/location`, {
+      latitude: 51.2280, longitude: 6.7740, accuracy: 8,
+    }));
+    assert.equal(geoLocation.order_id, geoOrder.id);
+    const geoEnter = await json(await post(monteur.cookie, '/api/geo/event', {
+      kind: 'order_enter', order_id: geoOrder.id, latitude: 51.2280, longitude: 6.7740, accuracy: 10,
+    }));
+    assert.equal(geoEnter.started, true);
+    assert.equal(geoEnter.time.source, 'gps');
+    const geoExit = await json(await post(monteur.cookie, '/api/geo/event', {
+      kind: 'order_exit', order_id: geoOrder.id, latitude: 51.2400, longitude: 6.7900, accuracy: 10,
+    }));
+    assert.equal(geoExit.stopped, true);
+    assert.ok(geoExit.time && geoExit.time.end_at === null, 'Wegezeit läuft nach Abfahrt weiter');
+    const geoHomeStop = await json(await post(monteur.cookie, '/api/geo/event', {
+      kind: 'home_enter', latitude: 51.2277, longitude: 6.7735, accuracy: 10,
+    }));
+    assert.equal(geoHomeStop.stopped, true);
+    assert.equal((await post(monteur.cookie, '/api/geo/event', {
+      kind: 'order_enter', order_id: geoOrder.id, latitude: 52.5, longitude: 7.0, accuracy: 10,
+    })).status, 400);
+    assert.ok((await json(await call(monteur.cookie, '/api/geo/events'))).length >= 2);
 
     const hrUser = await login('hr', 'hr123');
     const hrAccounts = await json(await call(hrUser.cookie, '/api/hr/accounts'));
     assert.ok(Array.isArray(hrAccounts.employees));
+    const hrEmployees = await json(await call(hrUser.cookie, '/api/employees'));
+    assert.ok(hrEmployees.every((row) => 'home_lat' in row), 'HR sieht die Hausanschriften');
     assert.equal((await call(hrUser.cookie, '/api/finance/overview')).status, 403);
+    assert.equal((await put(hrUser.cookie, `/api/orders/${geoOrder.id}/location`, {
+      latitude: 51.2280, longitude: 6.7740,
+    })).status, 403, 'HR darf keine Auftragsstandorte setzen');
   } finally {
     child.kill();
   }

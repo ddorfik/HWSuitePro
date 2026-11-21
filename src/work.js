@@ -221,13 +221,13 @@ export function runningTime(user) {
   ).get(user.id) ?? null;
 }
 
-export function startTime(user, { orderId = null, type = 'arbeit', note = '' } = {}) {
+export function startTime(user, { orderId = null, type = 'arbeit', note = '', source = 'manuell' } = {}) {
   db.prepare("UPDATE time_entries SET end_at = datetime('now') WHERE user_id = ? AND end_at IS NULL")
     .run(user.id);
   const id = Number(db.prepare(
-    `INSERT INTO time_entries (employee_id, user_id, order_id, start_at, end_at, type, note)
-     VALUES (?,?,?, datetime('now'), NULL, ?, ?)`
-  ).run(user.employee_id ?? null, user.id, orderId ?? null, type, note).lastInsertRowid);
+    `INSERT INTO time_entries (employee_id, user_id, order_id, start_at, end_at, type, note, source)
+     VALUES (?,?,?, datetime('now'), NULL, ?, ?, ?)`
+  ).run(user.employee_id ?? null, user.id, orderId ?? null, type, note, source).lastInsertRowid);
   return db.prepare(
     `SELECT t.*, o.number AS order_number, o.title AS order_title
      FROM time_entries t LEFT JOIN orders o ON o.id = t.order_id WHERE t.id = ?`
