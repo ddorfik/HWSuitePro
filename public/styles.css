@@ -839,10 +839,25 @@ body.logged-out { background: radial-gradient(1200px 600px at 10% 0%, #14434f 0%
   .material-add select, .material-add input { grid-column: span 1; }
   .material-add .btn { grid-column: 1 / -1; }
   .tech-btn { flex-basis: 28%; min-height: 62px; }
-  .modal { width: 100% !important; max-height: 94vh; border-radius: 16px 16px 0 0; }
+  /* Bottom-Sheet: Kopf und Fuß bleiben stehen, nur der Inhalt scrollt.
+     So endet das Fenster bündig am Bildschirmrand und der Fuß ist nie durchsichtig. */
   .modal-overlay { align-items: flex-end; padding: 0 !important; }
-  .modal-foot { flex-wrap: wrap; }
+  .modal {
+    width: 100% !important; max-height: 94vh; max-height: 94dvh;
+    border-radius: 16px 16px 0 0; margin-bottom: 0;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-head { flex: 0 0 auto; background: var(--surface); }
+  .modal-body {
+    flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  }
+  .modal-foot {
+    flex: 0 0 auto; flex-wrap: wrap; background: var(--surface);
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    box-shadow: 0 -10px 24px rgba(15, 28, 33, .07);
+  }
   .modal-foot .btn { flex: 1 1 40%; justify-content: center; }
+  body.modal-open .bottom-nav { display: none; }
   .login-card { padding: 22px 18px 18px; }
   .voice-fab { bottom: 88px; }
   .topbar-actions .search { display: none; }

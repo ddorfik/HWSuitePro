@@ -250,6 +250,7 @@ function openModal({ title, subtitle = '', body, footer = '', size = '', dismiss
       </div>
     </div>`;
   document.body.style.overflow = 'hidden';
+  document.body.classList.add('modal-open');
   const overlay = $('[data-overlay]');
   if (dismissible) {
     overlay.addEventListener('mousedown', (event) => {
@@ -265,6 +266,7 @@ function closeModal() {
   }
   $('#modal-root').innerHTML = '';
   document.body.style.overflow = '';
+  document.body.classList.remove('modal-open');
 }
 
 function formModal({ title, subtitle, fields, values = {}, submitLabel = 'Speichern', onSubmit, size = '', dismissible = true }) {
