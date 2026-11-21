@@ -1,4 +1,5 @@
 import { PDF, euro, deDate, deNumber } from './pdf.js';
+import { logoImage } from './branding.js';
 
 const W = 595.28;
 const H = 841.89;
@@ -49,10 +50,17 @@ function footer(doc, settings, pageLabel = '') {
 function header(doc, settings, { label, number, subtitle, info = [], recipient, introY = 0 }) {
   doc.rect(0, 0, W, 8, { fill: PETROL });
 
-  doc.text(settings.company_name, ML, 52, { size: 16, bold: true, color: PETROL });
-  doc.text(settings.trade_tagline || settings.trade || 'Handwerkersoftware', ML, 66, { size: 8.5, color: GREY });
-  doc.text(`${settings.company_street} · ${settings.company_zip} ${settings.company_city}`, ML, 81, { size: 8.5, color: GREY });
-  doc.text(`Tel. ${settings.company_phone} · ${settings.company_email}`, ML, 92, { size: 8.5, color: GREY });
+  // Firmenlogo oben links. Ohne Logo bleibt das bewährte Layout unverändert.
+  const logo = logoImage(settings);
+  const placed = logo
+    ? doc.image(logo.buffer, ML, 38, { maxWidth: 150, maxHeight: 42 })
+    : null;
+
+  const companyTop = placed ? Math.max(58, 38 + placed.height + 14) : 52;
+  doc.text(settings.company_name, ML, companyTop, { size: placed ? 14 : 16, bold: true, color: PETROL });
+  doc.text(settings.trade_tagline || settings.trade || 'Handwerkersoftware', ML, companyTop + 14, { size: 8.5, color: GREY });
+  doc.text(`${settings.company_street} · ${settings.company_zip} ${settings.company_city}`, ML, companyTop + 29, { size: 8.5, color: GREY });
+  doc.text(`Tel. ${settings.company_phone} · ${settings.company_email}`, ML, companyTop + 40, { size: 8.5, color: GREY });
 
   doc.textRight(label, RIGHT, 52, { size: label.length > 14 ? 15 : 20, bold: true, color: PETROL });
   if (number) doc.textRight(number, RIGHT, 68, { size: 11, color: INK });
@@ -64,7 +72,7 @@ function header(doc, settings, { label, number, subtitle, info = [], recipient, 
     infoY += 12;
   }
 
-  const recipientTop = 136;
+  const recipientTop = placed ? Math.max(136, companyTop + 78) : 136;
   doc.text(
     `${settings.company_name} · ${settings.company_street} · ${settings.company_zip} ${settings.company_city}`,
     ML, recipientTop - 12, { size: 7, color: GREY }
@@ -73,9 +81,10 @@ function header(doc, settings, { label, number, subtitle, info = [], recipient, 
     doc.text(line, ML, recipientTop + index * 13, { size: index === 0 ? 10.5 : 10, bold: index === 0, color: INK });
   });
 
-  doc.line(ML, 206, RIGHT, 206, { color: LINE });
-  if (subtitle) doc.text(subtitle, ML, 224, { size: 11, bold: true, color: INK });
-  return introY || 248;
+  const divider = recipientTop + 70;
+  doc.line(ML, divider, RIGHT, divider, { color: LINE });
+  if (subtitle) doc.text(subtitle, ML, divider + 18, { size: 11, bold: true, color: INK });
+  return introY || divider + 42;
 }
 
 function tableHeader(doc, y, columns, { fill = PETROL, color = '#ffffff' } = {}) {

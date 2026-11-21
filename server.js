@@ -7,6 +7,7 @@ import { handleApi, readBody } from './src/api.js';
 import { ensureInvoicePdfs } from './src/billing.js';
 import { runAutomation } from './src/automation.js';
 import { DATA_DIR, getSettings } from './src/db.js';
+import { logoPath } from './src/branding.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(ROOT, 'public');
@@ -150,6 +151,20 @@ async function handleRequest(req, res) {
   if (url.pathname.startsWith('/api/')) {
     const handled = await handleApi(req, res, url);
     if (!handled) sendError(res, 404, 'API-Endpunkt nicht gefunden');
+    return;
+  }
+
+  // Firmenlogo: öffentlich, damit Login, Kundenlinks und die eigene Website es nutzen können.
+  if (url.pathname === '/branding/logo') {
+    const logo = logoPath();
+    if (!logo) {
+      sendError(res, 404, 'Kein Logo hinterlegt');
+      return;
+    }
+    sendFile(res, logo, {
+      'Content-Type': 'image/jpeg',
+      'Cache-Control': 'public, max-age=3600',
+    });
     return;
   }
 

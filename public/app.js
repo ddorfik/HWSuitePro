@@ -4589,6 +4589,9 @@ async function renderSettings() {
   const demoAccounts = security.demo_accounts || [];
   const insecureNetwork = security.https === false
     && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  const logoUrl = settings.company_logo
+    ? `/branding/logo?v=${encodeURIComponent(settings.company_logo_updated || settings.company_logo)}`
+    : '';
 
   const input = (name, label, opts = {}) => `
     <div class="field ${opts.full ? 'full' : ''}">
@@ -4624,7 +4627,19 @@ async function renderSettings() {
             ${input('company_mobile', 'Mobil')}
             ${input('company_email', 'E-Mail')}
             ${input('company_web', 'Website')}
-            <div class="field"><label>Logo / Marke</label><input value="${esc(settings.app_name)}" disabled /></div>
+            <div class="field full">
+              <label>Firmenlogo</label>
+              <div class="logo-preview" id="logo-preview">
+                ${logoUrl
+                  ? `<img id="logo-preview-img" src="${esc(logoUrl)}" alt="Firmenlogo" />`
+                  : '<span class="small muted">Kein Logo hinterlegt</span>'}
+              </div>
+              <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+                <button class="btn sm" type="button" data-action="upload-logo">${icon('file')} Logo auswählen</button>
+                <button class="btn sm danger" type="button" id="logo-remove" data-action="remove-logo" ${logoUrl ? '' : 'hidden'}>${icon('trash')} Entfernen</button>
+              </div>
+              <span class="hint">JPG oder PNG, maximal 4 MB. Das Logo erscheint oben links in App, Angeboten, Rechnungen, Lieferscheinen und auf den öffentlichen Kundenlinks. PNG wird automatisch als JPG gespeichert.</span>
+            </div>
           </div>
         </div>
 
@@ -5561,6 +5576,95 @@ function progressInvoiceModal(orderId) {
 }
 
 
+/* ------------------------------------------------------------------ Firmenlogo */
+function updateLogoPreview(url) {
+  const box = $('#logo-preview');
+  if (!box) return;
+  box.innerHTML = url
+    ? `<img id="logo-preview-img" src="${esc(url)}" alt="Firmenlogo" />`
+    : '<span class="small muted">Kein Logo hinterlegt</span>';
+  const remove = $('#logo-remove');
+  if (remove) remove.hidden = !url;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Die Datei konnte nicht gelesen werden'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Das Bild konnte nicht geöffnet werden'));
+    image.src = dataUrl;
+  });
+}
+
+/** Wandelt jedes gängige Bild in ein PDF-taugliches JPEG mit weißem Hintergrund um. */
+async function logoFileToJpeg(file) {
+  if (!file.type.startsWith('image/')) throw new Error('Bitte eine Bilddatei auswählen');
+  if (file.size > 15 * 1024 * 1024) throw new Error('Das Bild ist zu groß (maximal 15 MB)');
+  const dataUrl = await readFileAsDataUrl(file);
+  const image = await loadImage(dataUrl);
+  const maxWidth = 1800;
+  const maxHeight = 900;
+  const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.92);
+}
+
+function chooseCompanyLogo() {
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = 'image/png,image/jpeg,image/webp';
+  picker.addEventListener('change', async () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    try {
+      toast('Logo wird vorbereitet …');
+      const dataUrl = await logoFileToJpeg(file);
+      const result = await api.post('/api/settings/logo', { dataUrl });
+      state.settings.company_logo = result.logo;
+      state.settings.company_logo_updated = result.version;
+      state.meta.company_logo = result.logo;
+      state.meta.company_logo_updated = result.version;
+      updateLogoPreview(brandLogoUrl());
+      applyBranding();
+      toast('Firmenlogo gespeichert. Es erscheint ab jetzt auf Rechnungen und Angeboten.');
+    } catch (error) {
+      toast(error.message || 'Das Logo konnte nicht gespeichert werden.', 'error');
+    }
+  });
+  picker.click();
+}
+
+async function deleteCompanyLogo() {
+  if (!confirm('Firmenlogo wirklich entfernen?')) return;
+  try {
+    await api.del('/api/settings/logo');
+    state.settings.company_logo = '';
+    state.settings.company_logo_updated = '';
+    state.meta.company_logo = '';
+    state.meta.company_logo_updated = '';
+    updateLogoPreview('');
+    applyBranding();
+    toast('Firmenlogo entfernt.');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 const ACTIONS = {
   'toggle-nav': () => $('#sidebar').classList.toggle('open'),
   'close-modal': () => closeModal(),
@@ -5585,6 +5689,8 @@ const ACTIONS = {
   'new-article': () => articleForm(),
   'new-employee': () => employeeForm(),
   'save-settings': () => $('#settings-form')?.requestSubmit(),
+  'upload-logo': () => chooseCompanyLogo(),
+  'remove-logo': () => deleteCompanyLogo(),
   'export-invoices': () => { window.location.href = '/api/export/rechnungen.csv'; },
   'filter-orders': (id, el) => { state.ordersFilter = el.dataset.filter; renderOrders(); },
   'filter-invoices': (id, el) => { state.invoicesFilter = el.dataset.filter; renderInvoices(); },
@@ -8033,6 +8139,16 @@ async function refreshBadgesOnly() {
   updateBadges();
 }
 
+const brandMarkDefaults = new WeakMap();
+
+function brandLogoUrl() {
+  const source = state.user ? state.settings : state.meta;
+  const logo = source.company_logo || '';
+  if (!logo) return '';
+  const version = source.company_logo_updated || logo;
+  return `/branding/logo?v=${encodeURIComponent(version)}`;
+}
+
 function applyBranding() {
   const name = state.settings.app_name || state.meta.app_name || 'HandwerkPro';
   const trade = state.settings.trade || state.meta.trade || 'Handwerkersoftware';
@@ -8046,6 +8162,14 @@ function applyBranding() {
   const loginTrade = $('#login-trade');
   if (loginApp) loginApp.textContent = name;
   if (loginTrade) loginTrade.textContent = tagline || `Handwerkersoftware für ${trade}`;
+  const logo = brandLogoUrl();
+  $$('.brand-mark').forEach((mark) => {
+    if (!brandMarkDefaults.has(mark)) brandMarkDefaults.set(mark, mark.innerHTML);
+    mark.classList.toggle('has-logo', Boolean(logo));
+    mark.innerHTML = logo
+      ? `<img src="${esc(logo)}" alt="${esc(name)}" />`
+      : brandMarkDefaults.get(mark);
+  });
 }
 
 function applyNavigation() {

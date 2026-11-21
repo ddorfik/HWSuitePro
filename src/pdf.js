@@ -56,6 +56,46 @@ export function textWidth(text, size = 10, bold = false) {
   return bold ? width * 1.03 : width;
 }
 
+/**
+ * Liest Breite, Höhe und Farbkanäle aus einem JPEG (SOF-Marker).
+ * Wird auch von der Logo-Verwaltung zur Validierung genutzt.
+ */
+export function jpegInfo(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return null;
+  if (buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let pos = 2;
+  while (pos < buffer.length - 1) {
+    if (buffer[pos] !== 0xff) { pos += 1; continue; }
+    const marker = buffer[pos + 1];
+    pos += 2;
+    if (marker === 0xff) { pos -= 1; continue; }
+    if (marker === 0xd8 || marker === 0xd9 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (pos + 2 > buffer.length) return null;
+    const length = buffer.readUInt16BE(pos);
+    if (length < 2 || pos + length > buffer.length) return null;
+    const isSof = (marker >= 0xc0 && marker <= 0xc3)
+      || (marker >= 0xc5 && marker <= 0xc7)
+      || (marker >= 0xc9 && marker <= 0xcb)
+      || (marker >= 0xcd && marker <= 0xcf);
+    if (isSof) {
+      if (pos + 8 > buffer.length) return null;
+      const height = buffer.readUInt16BE(pos + 3);
+      const width = buffer.readUInt16BE(pos + 5);
+      const components = buffer[pos + 7];
+      if (!width || !height || ![1, 3, 4].includes(components)) return null;
+      return {
+        width,
+        height,
+        components,
+        colorSpace: components === 1 ? 'DeviceGray' : components === 3 ? 'DeviceRGB' : 'DeviceCMYK',
+        progressive: marker === 0xc2 || marker === 0xc3,
+      };
+    }
+    pos += length;
+  }
+  return null;
+}
+
 // PDF-Name für MIME-Typen: Sonderzeichen als #XX kodieren.
 function pdfName(value) {
   return String(value || 'application/octet-stream').replace(/[^A-Za-z0-9._-]/g, (char) =>
@@ -102,6 +142,7 @@ export class PDF {
     this.pages = [];
     this.current = null;
     this.attachments = [];
+    this.images = [];
     this.addPage();
   }
 
@@ -167,6 +208,28 @@ export class PDF {
     return this;
   }
 
+  /**
+   * Zeichnet ein JPEG in einen Rahmen und behält das Seitenverhältnis bei.
+   * Gibt die tatsächlich gezeichnete Größe zurück oder null bei ungültigen Daten.
+   */
+  image(buffer, x, top, { maxWidth = 100, maxHeight = 100, align = 'left', valign = 'top' } = {}) {
+    const info = jpegInfo(buffer);
+    if (!info) return null;
+    const scale = Math.min(maxWidth / info.width, maxHeight / info.height);
+    const width = info.width * scale;
+    const height = info.height * scale;
+    const drawX = align === 'center' ? x + (maxWidth - width) / 2
+      : align === 'right' ? x + maxWidth - width : x;
+    const boxTop = this.height - top;
+    const drawY = valign === 'middle' ? boxTop - (maxHeight + height) / 2
+      : valign === 'bottom' ? boxTop - maxHeight
+        : boxTop - height;
+    const name = `/Im${this.images.length + 1}`;
+    this.images.push({ name, buffer, info });
+    this._op(`q ${num(width)} 0 0 ${num(height)} ${num(drawX)} ${num(drawY)} cm ${name} Do Q`);
+    return { width, height };
+  }
+
   wrap(text, maxWidth, size = 10, bold = false) {
     const words = String(text).split(/\s+/);
     const lines = [];
@@ -217,13 +280,26 @@ export class PDF {
       '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>'
     ); // 4
 
+    const imageIds = this.images.map((image) => {
+      const stream = image.buffer.toString('latin1');
+      const decode = image.info.components === 4 ? ' /Decode [1 0 1 0 1 0 1 0]' : '';
+      return addObject(
+        `<< /Type /XObject /Subtype /Image /Width ${image.info.width} /Height ${image.info.height} ` +
+        `/ColorSpace /${image.info.colorSpace} /BitsPerComponent 8 /Filter /DCTDecode${decode} ` +
+        `/Length ${image.buffer.length} >>\nstream\n${stream}\nendstream`
+      );
+    });
+    const xobjects = imageIds.length
+      ? ` /XObject << ${this.images.map((image, index) => `${image.name} ${imageIds[index]} 0 R`).join(' ')} >>`
+      : '';
+
     const pageIds = [];
     for (const ops of this.pages) {
       const stream = ops.join('\n');
       const contentId = addObject(`<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`);
       const pageId = addObject(
         `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${num(this.width)} ${num(this.height)}] ` +
-        `/Resources << /Font << /F1 ${fontRegular} 0 R /F2 ${fontBold} 0 R >> >> /Contents ${contentId} 0 R >>`
+        `/Resources << /Font << /F1 ${fontRegular} 0 R /F2 ${fontBold} 0 R >>${xobjects} >> /Contents ${contentId} 0 R >>`
       );
       pageIds.push(pageId);
     }

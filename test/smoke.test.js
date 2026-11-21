@@ -1508,6 +1508,7 @@ test('HERO 4–9: Zusammenarbeit, CRM, Portal, Lager und Lohn über HTTP', async
   const put = (cookie, path, body) => call(cookie, path, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
+  const del = (cookie, path) => call(cookie, path, { method: 'DELETE' });
 
   try {
     const chef = await login('chef', 'chef123');
@@ -1623,6 +1624,28 @@ test('HERO 4–9: Zusammenarbeit, CRM, Portal, Lager und Lohn über HTTP', async
     assert.equal((await post(monteur.cookie, '/api/time-categories', { label: 'Verboten' })).status, 403);
     const maternity = await json(await call(chef.cookie, '/api/hr/maternity?due_date=2026-12-01'));
     assert.ok(maternity.protection_start < maternity.due_date);
+
+    // Firmenlogo: öffentlich abrufbar, erscheint im PDF und ist nur für Einstellungen änderbar.
+    const logoSample = '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';
+    const logoBytes = Buffer.from(logoSample, 'base64');
+    const logoUpload = await json(await post(chef.cookie, '/api/settings/logo', {
+      dataUrl: `data:image/jpeg;base64,${logoSample}`,
+    }));
+    assert.equal(logoUpload.logo, 'logo.jpg');
+    assert.ok(logoUpload.version);
+    const logoResponse = await fetch(`${base}/branding/logo`);
+    assert.equal(logoResponse.status, 200);
+    assert.equal(logoResponse.headers.get('content-type'), 'image/jpeg');
+    assert.deepEqual(Buffer.from(await logoResponse.arrayBuffer()), logoBytes);
+    const publicMeta = await json(await fetch(`${base}/api/auth/meta`));
+    assert.equal(publicMeta.company_logo, 'logo.jpg');
+    const logoPdf = await call(chef.cookie, `/api/orders/${order.order.id}/pdf?type=auftrag`);
+    const logoPdfBytes = Buffer.from(await logoPdf.arrayBuffer());
+    assert.ok(logoPdfBytes.includes('/Subtype /Image'), 'PDF enthält das Logo');
+    assert.ok(logoPdfBytes.includes('/DCTDecode'));
+    assert.equal((await del(monteur.cookie, '/api/settings/logo')).status, 403);
+    assert.equal((await json(await del(chef.cookie, '/api/settings/logo'))).ok, true);
+    assert.equal((await fetch(`${base}/branding/logo`)).status, 404);
 
     // Lexware-Export.
     const lexware = await call(chef.cookie, '/api/finance/lexware');
