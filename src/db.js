@@ -561,6 +561,106 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Zusammenarbeit: Aufgaben, Nachrichten und Benachrichtigungen.
+CREATE TABLE IF NOT EXISTS tasks (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  title       TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  order_id    INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+  employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+  created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  due_date    TEXT,
+  priority    TEXT NOT NULL DEFAULT 'normal',
+  status      TEXT NOT NULL DEFAULT 'offen',
+  done_at     TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id    INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL DEFAULT 'info',
+  title      TEXT NOT NULL,
+  body       TEXT NOT NULL DEFAULT '',
+  link       TEXT,
+  read_at    TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- CRM: Anfragen/Leads mit konfigurierbaren Stufen.
+CREATE TABLE IF NOT EXISTS lead_stages (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  name   TEXT NOT NULL,
+  sort   INTEGER NOT NULL DEFAULT 0,
+  closed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS leads (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL,
+  company     TEXT,
+  email       TEXT,
+  phone       TEXT,
+  message     TEXT NOT NULL DEFAULT '',
+  source      TEXT NOT NULL DEFAULT 'website',
+  stage_id    INTEGER REFERENCES lead_stages(id) ON DELETE SET NULL,
+  value       REAL NOT NULL DEFAULT 0,
+  notes       TEXT NOT NULL DEFAULT '',
+  customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+  order_id    INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT
+);
+
+-- Lager: Reservierungen/Packlisten je Auftrag.
+CREATE TABLE IF NOT EXISTS order_reservations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id   INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+  quantity   REAL NOT NULL DEFAULT 0,
+  packed_at  TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Personal: Verträge und Zeitkategorien.
+CREATE TABLE IF NOT EXISTS employment_contracts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL DEFAULT 'unbefristet',
+  start_date  TEXT,
+  end_date    TEXT,
+  weekly_hours REAL NOT NULL DEFAULT 40,
+  salary      REAL NOT NULL DEFAULT 0,
+  notes       TEXT NOT NULL DEFAULT '',
+  document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS time_categories (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  key    TEXT UNIQUE NOT NULL,
+  label  TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_employee ON tasks(employee_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_order ON tasks(order_id);
+CREATE INDEX IF NOT EXISTS idx_messages_order ON messages(order_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_order ON order_reservations(order_id);
+CREATE INDEX IF NOT EXISTS idx_contracts_employee ON employment_contracts(employee_id);
 CREATE INDEX IF NOT EXISTS idx_customer_notes_customer ON customer_notes(customer_id);
 CREATE INDEX IF NOT EXISTS idx_documents_customer ON documents(customer_id);
 CREATE INDEX IF NOT EXISTS idx_documents_order ON documents(order_id);
@@ -665,6 +765,30 @@ ensureColumn('properties', 'latitude', 'REAL');
 ensureColumn('properties', 'longitude', 'REAL');
 ensureColumn('properties', 'geo_at', 'TEXT');
 ensureColumn('time_entries', 'source', "TEXT NOT NULL DEFAULT 'manuell'");
+// Zusammenarbeit, CRM, Lager und Personal (HERO-Parität).
+ensureColumn('documents', 'employee_id', 'INTEGER');
+ensureColumn('customers', 'portal_token', 'TEXT');
+ensureColumn('invoices', 'kind', "TEXT NOT NULL DEFAULT 'rechnung'");
+ensureColumn('invoices', 'percent', 'REAL');
+ensureColumn('time_entries', 'break_minutes', 'INTEGER NOT NULL DEFAULT 0');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_portal_token ON customers(portal_token) WHERE portal_token IS NOT NULL;');
+// Standard-Stufen der Anfragen-Pipeline und Zeitkategorien einmalig anlegen.
+if (!db.prepare('SELECT COUNT(*) AS n FROM lead_stages').get().n) {
+  const stages = [
+    ['Neu', 10, 0], ['Kontaktiert', 20, 0], ['Angebot', 30, 0],
+    ['Gewonnen', 40, 1], ['Verloren', 50, 1],
+  ];
+  const insert = db.prepare('INSERT INTO lead_stages (name, sort, closed) VALUES (?,?,?)');
+  stages.forEach(([name, sort, closed]) => insert.run(name, sort, closed));
+}
+if (!db.prepare('SELECT COUNT(*) AS n FROM time_categories').get().n) {
+  const categories = [
+    ['arbeit', 'Arbeit', 10], ['fahrt', 'Fahrt', 20], ['urlaub', 'Urlaub', 30],
+    ['krank', 'Krank', 40], ['schule', 'Schule', 50],
+  ];
+  const insert = db.prepare('INSERT INTO time_categories (key, label, sort) VALUES (?,?,?)');
+  categories.forEach(([key, label, sort]) => insert.run(key, label, sort));
+}
 // Standort-Ereignisse werden nur für die Nachvollziehbarkeit der Zeiten benötigt.
 db.exec("DELETE FROM geo_time_events WHERE created_at < datetime('now', '-180 days');");
 // Lager
@@ -772,6 +896,8 @@ export const DEFAULT_SETTINGS = {
   mat_dealer_map_stock: 'stock',
   mat_dealer_map_datasheet: 'datasheet_url',
   mat_dealer_map_image: 'image_url',
+  mat_dealer_order_enabled: '0',
+  mat_dealer_order_path: '/api/orders',
   mat_ids_enabled: '0',
   mat_ids_shop_url: '',
   mat_ids_supplier: '',
@@ -792,6 +918,12 @@ export const DEFAULT_SETTINGS = {
   // Personal
   hr_weekly_hours: '40',
   hr_vacation_days: '30',
+  // Pausenautomatik (0 = aus): nach 6 h bzw. 9 h Arbeitszeit.
+  break_auto: '0',
+  break_after_6h: '30',
+  break_after_9h: '45',
+  // Anfragen/CRM: Token für das öffentliche Anfrageformular.
+  lead_token: '',
   // Finanzen
   sepa_creditor_id: '',
   datev_consultant: '12345',

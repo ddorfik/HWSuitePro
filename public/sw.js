@@ -1,10 +1,10 @@
 /* HandwerkPro Service Worker – App-Hülle offline, API immer live */
-const CACHE = 'handwerkpro-v15';
+const CACHE = 'handwerkpro-v17';
 const ASSETS = [
   '/',
   '/index.html',
-  '/app.js?v=1.6.3',
-  '/styles.css?v=1.6.3',
+  '/app.js?v=1.7.0',
+  '/styles.css?v=1.7.0',
   '/icon.svg',
   '/icon-192.png',
   '/icon-512.png',
@@ -33,7 +33,7 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
   // Die öffentliche Terminbestätigung gehört dem Kunden, nicht der App-Hülle.
-  if (url.pathname.startsWith('/termin/')) return;
+  if (url.pathname.startsWith('/termin/') || url.pathname.startsWith('/anfrage/') || url.pathname.startsWith('/portal/')) return;
 
   // Seitenaufrufe: immer zuerst das Netz fragen, damit Updates sofort ankommen.
   if (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {

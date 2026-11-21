@@ -162,6 +162,22 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // Öffentliches Anfrageformular und Kundenportal: tokenisiert, ohne Anmeldung
+  if (url.pathname === '/anfrage' || url.pathname.startsWith('/anfrage/')) {
+    sendFile(res, join(PUBLIC, 'anfrage.html'), {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    return;
+  }
+  if (url.pathname === '/portal' || url.pathname.startsWith('/portal/')) {
+    sendFile(res, join(PUBLIC, 'portal.html'), {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    return;
+  }
+
   // Statische Dateien
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, '');
