@@ -32,6 +32,8 @@ const state = {
   currentOrderId: null,
   currentReportId: null,
   voice: null,
+  dictation: null,
+  geo: null,
   loading: false,
 };
 
@@ -117,6 +119,7 @@ const ICONS = {
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
   image: '<rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="m21 15-4.5-4.5L6 21"/>',
   dashboard: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  home: '<path d="m3 11 9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/>',
 };
 
 const icon = (name, cls = '') =>
@@ -197,6 +200,12 @@ const api = {
       const error = new Error(message);
       error.status = response.status;
       if (data?.code) error.code = data.code;
+      // Tritt auf, wenn der Browser die neue App lädt, der Server aber noch mit
+      // altem Code läuft (z. B. nach einem Update ohne Neustart).
+      if (response.status === 404 && message === 'API-Endpunkt nicht gefunden') {
+        error.message = 'Server läuft mit einer älteren Version. Bitte den Server neu starten (npm start) und die Seite neu laden.';
+        error.code = 'server_outdated';
+      }
       if (response.status === 401 && !path.startsWith('/api/auth/login')) showLogin();
       throw error;
     }
@@ -250,6 +259,10 @@ function openModal({ title, subtitle = '', body, footer = '', size = '', dismiss
 }
 
 function closeModal() {
+  if (state.dictation) {
+    state.dictation.stop();
+    state.dictation = null;
+  }
   $('#modal-root').innerHTML = '';
   document.body.style.overflow = '';
 }
@@ -310,7 +323,8 @@ function formModal({ title, subtitle, fields, values = {}, submitLabel = 'Speich
       const target = form.elements[button.dataset.dictate];
       const status = $(`[data-dictate-status="${button.dataset.dictate}"]`, form);
       if (!target) return;
-      if (target.value.trim()) target.value = `${target.value.trimEnd()} `;
+      const active = state.dictation && state.dictation.textarea === target;
+      if (!active && target.value.trim()) target.value = `${target.value.trimEnd()} `;
       listenInline(target, status);
     });
   });
@@ -460,7 +474,10 @@ async function updateBadges() {
 /* ------------------------------------------------------------------ Dashboard */
 async function renderDashboard() {
   const data = await api.get('/api/dashboard');
-  if (data.personal) return renderTechnicianDashboard(data);
+  if (data.personal) {
+    await ensureGeoState();
+    return renderTechnicianDashboard(data);
+  }
   if (data.hr) return renderHrDashboard(data);
   const k = data.kpis;
   const maxRevenue = Math.max(...data.revenueByMonth.map((m) => m.value), 1);
@@ -603,6 +620,10 @@ function clockCard(data) {
       </div>
       ${running ? `<div class="clock-info">${icon('receipt')} ${esc(running.order_number ? `${running.order_number} · ${running.order_title || ''}` : 'Ohne Auftrag')}
         <span class="clock-since">seit ${fmtTime(running.start_at)}</span></div>` : ''}
+      ${can('time.own') ? `<div class="clock-geo">
+        <span class="geo-dot ${state.geo?.enabled ? (state.geo.last_error ? 'error' : 'on') : ''}" data-geo-dot></span>
+        <span class="small" data-geo-status-text>${esc(geoStatusText())}</span>
+      </div>` : ''}
       <div class="clock-actions">
         <button class="btn ${running ? 'danger' : 'primary'} big" type="button" data-action="toggle-time" ${running ? '' : `data-id="${state.currentOrderId || ''}"`}>
           ${icon(running ? 'stop' : 'play')} ${running ? 'Ausstempeln' : 'Einstempeln'}
@@ -621,6 +642,7 @@ function renderTechnicianDashboard(data) {
 
   view.innerHTML = `
     ${clockCard(data)}
+    ${can('time.own') ? geoCard() : ''}
 
     <div class="kpi-grid tight">
       <div class="kpi link" data-action="goto" data-page="orders">
@@ -666,6 +688,7 @@ function renderTechnicianDashboard(data) {
             ${can('reports.own') ? `<button class="btn sm" type="button" data-action="new-report" data-id="${order.id}">${icon('file')} Bericht</button>` : ''}
             ${can('photos.own') ? `<button class="btn sm" type="button" data-action="upload-photo" data-id="${order.id}" data-kind="vorher">${icon('camera')}</button>` : ''}
             ${mapsLink(order) ? `<a class="btn sm ghost" href="${mapsLink(order)}" target="_blank" rel="noopener">${icon('pin')} Route</a>` : ''}
+            ${order.property_id && can('orders.progress') ? `<button class="btn sm ghost" type="button" data-action="order-location" data-id="${order.id}" title="GPS-Standort für die automatische Zeiterfassung speichern">${icon('pin')} Standort</button>` : ''}
           </div>
         </div>`).join('') : `
         <div class="card"><div class="card-body pad"><div class="empty">${icon('check')}<div><b>Keine offenen Aufträge</b><div class="small">Alles erledigt – oder es sind noch keine Aufträge zugewiesen.</div></div></div></div></div>`}
@@ -748,6 +771,7 @@ function renderHrDashboard(data) {
 async function renderMyDay() {
   const data = await api.get('/api/dashboard');
   if (data.personal) {
+    await ensureGeoState();
     renderTechnicianDashboard(data);
     return;
   }
@@ -1006,12 +1030,13 @@ async function openOrder(orderId) {
         ${canPhoto ? `<button class="tech-btn" type="button" data-action="upload-photo" data-id="${order.id}" data-kind="nachher">${icon('camera')}<span>Fotos nachher</span></button>` : ''}
         ${canPhoto ? `<button class="tech-btn" type="button" data-action="upload-photo" data-id="${order.id}" data-kind="sonstiges">${icon('image')}<span>Weitere Fotos</span></button>` : ''}
         ${can('time.own') ? `<button class="tech-btn" type="button" data-action="toggle-time" data-id="${order.id}">${icon('clock')}<span id="tech-time-label">${state.time ? 'Ausstempeln' : 'Einstempeln'}</span></button>` : ''}
+        ${canProgress && property ? `<button class="tech-btn" type="button" data-action="order-location" data-id="${order.id}">${icon('pin')}<span>Standort</span></button>` : ''}
         ${canReport ? `<button class="tech-btn" type="button" data-action="start-voice">${icon('mic')}<span>Sprache</span></button>` : ''}
       </div>` : ''}
 
     <div class="meta-grid">
       <div class="meta-item"><div class="k">Kunde</div><div class="v">${esc(customerName(customer))}<small>${esc(customer?.number || '')}</small></div></div>
-      <div class="meta-item"><div class="k">Objekt</div><div class="v">${esc(property?.label || '–')}<small>${esc(property ? `${property.street || ''}, ${property.zip || ''} ${property.city || ''}` : '')}</small></div></div>
+      <div class="meta-item"><div class="k">Objekt</div><div class="v">${esc(property?.label || '–')}<small>${esc(property ? `${property.street || ''}, ${property.zip || ''} ${property.city || ''}` : '')}${property?.latitude ? ' · GPS-Standort gespeichert' : ''}</small></div></div>
       <div class="meta-item"><div class="k">Monteur</div><div class="v">${esc(employee?.name || 'nicht zugewiesen')}<small>${esc(employee?.role || '')}</small></div></div>
       <div class="meta-item"><div class="k">Termin</div><div class="v">${order.scheduled_date ? fmtDate(order.scheduled_date) : '–'}<small>${esc(order.priority === 'dringend' ? 'Dringend' : '')}</small></div></div>
     </div>
@@ -1835,6 +1860,8 @@ function propertyForm(property = null, customerId = null) {
       { name: 'city', label: 'Ort' },
       { name: 'heating_type', label: 'Heizungsart', placeholder: 'z. B. Gas-Brennwert' },
       { name: 'meter_number', label: 'Zählernummer' },
+      { name: 'latitude', label: 'Breitengrad (GPS)', type: 'number', step: '0.0000001', min: -90, max: 90, hint: 'Optional. Am einfachsten vor Ort über „Standort“ im Auftrag aufnehmen.' },
+      { name: 'longitude', label: 'Längengrad (GPS)', type: 'number', step: '0.0000001', min: -180, max: 180, hint: 'Optional – wird für die GPS-Zeiterfassung benötigt.' },
       { name: 'gas_connection', label: 'Gasanschluss', type: 'checkbox', checkLabel: 'vorhanden', default: 1 },
       { name: 'water_connection', label: 'Wasseranschluss', type: 'checkbox', checkLabel: 'vorhanden', default: 1 },
       { name: 'notes', label: 'Zugang / Besonderheiten', type: 'textarea', full: true, rows: 3 },
@@ -2435,6 +2462,21 @@ async function renderPlanning() {
   const appointments = board
     ? board.appointments
     : await api.get(`/api/appointments?from=${toDateInput(start)}&to=${toDateInput(end)}`);
+  // Urlaub und Abwesenheiten auch in Wochen-/Monatsansicht anzeigen.
+  let absenceRows = board ? board.absences : [];
+  if (!board && can('employees.view')) {
+    try {
+      const data = await api.get(`/api/absences?from=${toDateInput(start)}&to=${toDateInput(end)}`);
+      absenceRows = (data.absences || []).filter((row) => row.status !== 'abgelehnt');
+    } catch { absenceRows = []; }
+  }
+  const absencesForDay = (key) => absenceRows.filter((row) => row.start_date <= key && row.end_date >= key);
+  const absenceLabel = (row) => `${row.type_label || (row.type === 'urlaub' ? 'Urlaub' : 'Abwesend')}${row.status === 'beantragt' ? ' (beantragt)' : ''}`;
+  const absenceDayLabel = (row) => {
+    const short = String(row.employee_name || '').trim().split(/\s+/)[0];
+    return short ? `${short} · ${absenceLabel(row)}` : absenceLabel(row);
+  };
+  const absenceTitle = (row) => `${row.type_label || 'Abwesend'} · ${row.employee_name || ''} · ${row.status_label || row.status}`.replace(/\s+/g, ' ').trim();
   const term = state.search.toLowerCase();
   const visible = term
     ? appointments.filter((a) => `${a.title} ${a.order_number || ''} ${customerName(a)} ${a.employee_name || ''} ${kindLabel(a.kind)}`.toLowerCase().includes(term))
@@ -2480,9 +2522,11 @@ async function renderPlanning() {
         <div class="cal-head"></div>
         ${days.map((date) => {
           const key = toDateInput(date);
+          const dayAbsences = absencesForDay(key);
           return `<div class="cal-head-cell ${key === todayKey ? 'today' : ''}">
             <div class="dow">${date.toLocaleDateString('de-DE', { weekday: 'short' })}</div>
             <div class="day">${date.getDate()}</div>
+            ${dayAbsences.map((row) => `<div class="cal-absence ${row.status === 'beantragt' ? 'pending' : ''}" title="${esc(absenceTitle(row))}">${esc(absenceDayLabel(row))}</div>`).join('')}
           </div>`;
         }).join('')}
         <div class="cal-times">
@@ -2491,7 +2535,7 @@ async function renderPlanning() {
         ${days.map((date) => {
           const key = toDateInput(date);
           const dayEvents = shown.filter((a) => toDateInput(a.start_at) === key);
-          return `<div class="cal-day ${key === todayKey ? 'today' : ''}" data-date="${key}">
+          return `<div class="cal-day ${key === todayKey ? 'today' : ''} ${absencesForDay(key).length ? 'has-absence' : ''}" data-date="${key}">
             ${hours.map(() => '<div class="slot"></div>').join('')}
             ${dayEvents.map(eventMarkup).join('')}
           </div>`;
@@ -2511,10 +2555,15 @@ async function renderPlanning() {
       ${monthDays.map((date) => {
         const key = toDateInput(date);
         const events = shown.filter((a) => toDateInput(a.start_at) === key);
+        const dayAbsences = absencesForDay(key);
         const otherMonth = date.getMonth() !== state.monthStart.getMonth();
         return `<div class="month-day ${otherMonth ? 'other' : ''} ${key === todayKey ? 'today' : ''}" data-date="${key}">
           <div class="md-num">${date.getDate()}</div>
           <div class="md-events">
+            ${dayAbsences.map((row) => `<div class="md-absence ${row.status === 'beantragt' ? 'pending' : ''}" title="${esc(absenceTitle(row))}">
+              <span class="md-dot" style="background:${row.status === 'beantragt' ? '#d97706' : '#be123c'}"></span>
+              <span class="md-title">${esc(absenceDayLabel(row))}</span>
+            </div>`).join('')}
             ${events.slice(0, 3).map((event) => {
               const info = kindInfo(event.kind);
               return `<div class="md-event" data-action="open-appointment" data-id="${event.id}" data-order="${event.order_id || ''}" title="${esc(event.title)} · ${esc(info.label)}">
@@ -2565,7 +2614,7 @@ async function renderPlanning() {
                 const events = board.appointments.filter((row) => row.employee_id === employee.id
                   && toDateInput(row.start_at) === key);
                 return `<td class="pt-cell ${key === todayKey ? 'today' : ''}">
-                  ${absences.map((row) => `<span class="pt-chip absence">${esc(row.type === 'urlaub' ? 'Urlaub' : 'Abwesend')}</span>`).join('')}
+                  ${absences.map((row) => `<span class="pt-chip absence ${row.status === 'beantragt' ? 'pending' : ''}" title="${esc(absenceTitle(row))}">${esc(absenceLabel(row))}</span>`).join('')}
                   ${events.map((row) => `<button class="pt-chip appt" type="button" data-action="open-appointment" data-id="${row.id}" title="${esc(row.title)}">
                     <span>${fmtTime(row.start_at)}</span>${esc(row.order_title || row.title)}
                   </button>`).join('')}
@@ -2845,12 +2894,14 @@ async function renderTime() {
   const manager = can('time.view.all');
   const from = state.timeFrom || addDaysISO(todayISO(), -13);
   state.timeFrom = from;
+  await ensureGeoState();
   const entries = await api.get(`/api/time?from=${from}&to=${todayISO()}`);
   const total = entries.reduce((sum, entry) => sum + (entry.minutes || 0), 0);
 
   const employeeOptions = state.employees.map((employee) => ({ value: employee.id, label: employee.name }));
   view.innerHTML = `
     ${clockCard({ time: state.time, todayMinutes: state.todayMinutes, weekMinutes: state.weekMinutes })}
+    ${can('time.own') ? geoCard() : ''}
     <div class="section-head">
       <div><h2>${manager ? 'Alle Zeiten' : 'Meine Zeiten'}</h2><div class="sub">Letzte 14 Tage · ${formatDuration(total)} gesamt</div></div>
       <button class="btn sm" type="button" data-action="new-time">${icon('plus')} Zeit nachtragen</button>
@@ -2868,7 +2919,7 @@ async function renderTime() {
                 <td class="nowrap">${fmtTime(entry.start_at)}</td>
                 <td class="nowrap">${entry.end_at ? fmtTime(entry.end_at) : '<span class="badge in_arbeit">läuft</span>'}</td>
                 <td class="right strong">${formatDuration(entry.minutes)}</td>
-                <td class="small muted">${esc(entry.note || '')}</td>
+                <td class="small muted">${entry.source === 'gps' ? '<span class="mini-tag">GPS</span> ' : ''}${esc(entry.note || '')}</td>
                 <td class="right"><button class="icon-btn" type="button" data-action="delete-time" data-id="${entry.id}" title="Eintrag löschen">${icon('trash')}</button></td>
               </tr>`).join('') : `<tr><td colspan="${manager ? 8 : 7}"><div class="empty">${icon('clock')}<div>Noch keine Zeiten im Zeitraum</div></div></td></tr>`}
           </tbody>
@@ -2951,6 +3002,393 @@ async function refreshSelfTime() {
   } catch { /* stumm */ }
 }
 
+/* ------------------------------------------------------------------ GPS-Zeiterfassung */
+const GEO_ZONE_STORAGE = () => `handwerkpro_geo_zones_${state.user?.id || 'anon'}`;
+
+function distanceBetween(lat1, lng1, lat2, lng2) {
+  const rad = (value) => Number(value) * Math.PI / 180;
+  const dLat = rad(lat2) - rad(lat1);
+  const dLng = rad(lng2) - rad(lng1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function loadStoredZones() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(GEO_ZONE_STORAGE()) || 'null');
+    if (!raw || !raw.updatedAt) return null;
+    // Nach längerer Pause keine alten Übergänge auslösen.
+    if (Date.now() - Number(raw.updatedAt) > 6 * 60 * 60 * 1000) return null;
+    return {
+      initialized: true,
+      homeInside: Boolean(raw.homeInside),
+      orderInside: raw.orderInside && typeof raw.orderInside === 'object' ? raw.orderInside : {},
+      activeOrderId: raw.activeOrderId ?? null,
+    };
+  } catch { return null; }
+}
+
+function saveStoredZones(zones) {
+  try {
+    localStorage.setItem(GEO_ZONE_STORAGE(), JSON.stringify({ ...zones, updatedAt: Date.now() }));
+  } catch { /* Speicher nicht verfügbar */ }
+}
+
+async function ensureGeoState(force = false) {
+  if (!can('time.own')) return null;
+  if (state.geo?.loaded && !force) {
+    if (state.geo.enabled) startGeoTracking();
+    return state.geo;
+  }
+  try {
+    const data = await api.get('/api/geo/status');
+    state.geo = {
+      ...(state.geo || {}),
+      ...data,
+      loaded: true,
+      supported: 'geolocation' in navigator,
+      secure: window.isSecureContext,
+    };
+    if (data.time !== undefined) state.time = data.time;
+    const stored = state.geo.zones || loadStoredZones();
+    if (stored) state.geo.zones = stored;
+    if (state.geo.enabled) startGeoTracking();
+    else stopGeoTracking();
+  } catch (error) {
+    state.geo = {
+      ...(state.geo || {}), loaded: true, enabled: false,
+      supported: 'geolocation' in navigator,
+      secure: window.isSecureContext,
+      last_error: error.message,
+    };
+  }
+  return state.geo;
+}
+
+function startGeoTracking() {
+  const geo = state.geo;
+  if (!geo?.enabled || !geo.supported || !geo.secure) {
+    stopGeoTracking();
+    return;
+  }
+  if (geo.watchId != null) return;
+  try {
+    geo.watchId = navigator.geolocation.watchPosition(onGeoPosition, onGeoError, {
+      enableHighAccuracy: true,
+      maximumAge: 15000,
+      timeout: 30000,
+    });
+  } catch {
+    geo.last_error = 'Standortbestimmung konnte nicht gestartet werden.';
+    geo.watchId = null;
+    updateGeoIndicators();
+    return;
+  }
+  if (geo.refreshTimer) clearInterval(geo.refreshTimer);
+  geo.refreshTimer = setInterval(refreshGeoTargets, 5 * 60 * 1000);
+  updateGeoIndicators();
+}
+
+function stopGeoTracking() {
+  const geo = state.geo;
+  if (!geo) return;
+  if (geo.watchId != null && 'geolocation' in navigator) {
+    try { navigator.geolocation.clearWatch(geo.watchId); } catch { /* stumm */ }
+  }
+  geo.watchId = null;
+  if (geo.refreshTimer) clearInterval(geo.refreshTimer);
+  geo.refreshTimer = null;
+  updateGeoIndicators();
+}
+
+async function refreshGeoTargets() {
+  if (!state.geo?.enabled) return;
+  try {
+    const data = await api.get('/api/geo/status');
+    state.geo = { ...state.geo, ...data, loaded: true };
+    if (data.time !== undefined) state.time = data.time;
+    if (data.enabled) startGeoTracking();
+    else stopGeoTracking();
+    updateGeoIndicators();
+  } catch { /* Verbindung unterbrochen – beim nächsten Versuch erneut */ }
+}
+
+function onGeoPosition(position) {
+  const geo = state.geo;
+  if (!geo?.enabled) return;
+  geo.last_position = {
+    latitude: position.coords.latitude,
+    longitude: position.coords.longitude,
+    accuracy: Math.round(position.coords.accuracy || 0),
+    at: Date.now(),
+  };
+  geo.last_error = '';
+  evaluateGeofences();
+}
+
+function onGeoError(error) {
+  const geo = state.geo;
+  if (!geo) return;
+  geo.last_error = error.code === 1
+    ? 'Standortfreigabe verweigert – bitte im Browser erlauben.'
+    : error.code === 3
+      ? 'GPS-Signal zu schwach – bitte kurz warten.'
+      : 'Standort konnte nicht ermittelt werden.';
+  geo.quality = 'bad';
+  updateGeoIndicators();
+}
+
+function geoStatusText() {
+  const geo = state.geo;
+  if (!geo) return 'GPS-Status wird geladen …';
+  if (!geo.supported) return 'Dieser Browser unterstützt kein GPS.';
+  if (!geo.secure) return 'GPS benötigt HTTPS oder localhost.';
+  if (!geo.enabled) return 'GPS-Zeiterfassung ist ausgeschaltet.';
+  if (geo.absence_today) return `GPS pausiert · genehmigte Abwesenheit (${geo.absence_today.type_label || geo.absence_today.type}).`;
+  if (geo.last_error) return geo.last_error;
+  if (!geo.last_position) return 'GPS aktiv – warte auf Standort …';
+  if (geo.quality === 'bad') {
+    return `GPS-Signal ungenau (±${Math.round(geo.last_position.accuracy || 0)} m) – warte …`;
+  }
+  const parts = [`GPS aktiv · ±${Math.round(geo.last_position.accuracy || 0)} m`];
+  if (geo.inside_order) parts.push(`an ${geo.inside_order.number}`);
+  else if (geo.inside_home) parts.push('zu Hause');
+  return parts.join(' · ');
+}
+
+function updateGeoIndicators() {
+  const text = geoStatusText();
+  $$('[data-geo-status-text]').forEach((element) => { element.textContent = text; });
+  const on = Boolean(state.geo?.enabled);
+  const error = Boolean(state.geo?.last_error);
+  $$('[data-geo-dot]').forEach((element) => {
+    element.classList.toggle('on', on && !error);
+    element.classList.toggle('error', on && error);
+  });
+}
+
+function evaluateGeofences() {
+  const geo = state.geo;
+  if (!geo?.enabled || !geo.last_position) return;
+  if (geo.absence_today) {
+    geo.inside_order = null;
+    updateGeoIndicators();
+    return;
+  }
+  const position = geo.last_position;
+  const accuracy = Number(position.accuracy) || 0;
+  const radius = Number(geo.radius_m) || 150;
+  if (accuracy > Math.max(250, radius * 1.5)) {
+    geo.quality = 'bad';
+    updateGeoIndicators();
+    return;
+  }
+  geo.quality = 'ok';
+  const exitRadius = radius + Math.max(50, radius * 0.35);
+  const zones = geo.zones || { initialized: false, homeInside: false, orderInside: {}, activeOrderId: null };
+  if (!zones.orderInside) zones.orderInside = {};
+  const firstRun = !zones.initialized;
+
+  let nearest = null;
+  const seen = new Set();
+  (geo.targets || []).forEach((target) => {
+    if (target.latitude == null || target.longitude == null) return;
+    const key = String(target.order_id);
+    seen.add(key);
+    const distance = distanceBetween(
+      position.latitude, position.longitude,
+      Number(target.latitude), Number(target.longitude),
+    );
+    const wasInside = zones.orderInside[key] === true;
+    const inside = wasInside ? distance <= exitRadius : distance <= radius;
+    zones.orderInside[key] = inside;
+    target.distance_m = Math.round(distance);
+    if (inside && (!nearest || distance < nearest.distance_m)) {
+      nearest = { ...target, distance_m: distance };
+    }
+  });
+  Object.keys(zones.orderInside).forEach((key) => { if (!seen.has(key)) delete zones.orderInside[key]; });
+
+  let homeInside = false;
+  if (geo.home) {
+    const distance = distanceBetween(
+      position.latitude, position.longitude,
+      Number(geo.home.latitude), Number(geo.home.longitude),
+    );
+    const wasInside = zones.homeInside === true;
+    homeInside = wasInside ? distance <= exitRadius : distance <= radius;
+  }
+
+  // Erste Auswertung nach dem Start: nur Ist-Zustand merken, keine Zeit schalten.
+  if (firstRun) {
+    zones.initialized = true;
+    zones.homeInside = homeInside;
+    zones.activeOrderId = nearest ? nearest.order_id : null;
+    geo.zones = zones;
+    geo.inside_order = nearest ? { order_id: nearest.order_id, number: nearest.number } : null;
+    geo.inside_home = !nearest && homeInside;
+    saveStoredZones(zones);
+    updateGeoIndicators();
+    return;
+  }
+
+  // Baustelle hat Vorrang vor Zuhause (z. B. wenn beide nah beieinander liegen).
+  if (nearest) {
+    geo.inside_order = { order_id: nearest.order_id, number: nearest.number };
+    geo.inside_home = false;
+    if (zones.activeOrderId !== nearest.order_id) {
+      zones.activeOrderId = nearest.order_id;
+      sendGeoEvent('order_enter', nearest.order_id);
+    }
+  } else {
+    geo.inside_order = null;
+    if (zones.activeOrderId != null && !zones.orderInside[String(zones.activeOrderId)]) {
+      const previous = zones.activeOrderId;
+      zones.activeOrderId = null;
+      sendGeoEvent('order_exit', previous);
+    }
+    geo.inside_home = homeInside;
+    if (homeInside !== Boolean(zones.homeInside)) {
+      sendGeoEvent(homeInside ? 'home_enter' : 'home_exit');
+    }
+  }
+
+  zones.homeInside = homeInside;
+  geo.zones = zones;
+  saveStoredZones(zones);
+  updateGeoIndicators();
+}
+
+async function sendGeoEvent(kind, orderId = null) {
+  const geo = state.geo;
+  if (!geo?.last_position) return;
+  if (geo.sending) {
+    geo.queue = geo.queue || [];
+    geo.queue.push({ kind, orderId });
+    return;
+  }
+  geo.sending = true;
+  try {
+    const position = geo.last_position;
+    const result = await api.post('/api/geo/event', {
+      kind,
+      order_id: orderId || null,
+      latitude: position.latitude,
+      longitude: position.longitude,
+      accuracy: position.accuracy,
+    });
+    if (result.time !== undefined) state.time = result.time;
+    if (result.message && !result.duplicate) {
+      toast(result.message, result.started ? 'success' : 'info');
+      if (!state.dictation) speak(result.message.replace(/^GPS:\s*/, ''));
+      geo.last_event = { kind, at: Date.now(), message: result.message };
+    }
+    await refreshSelfTime();
+    if (state.page === 'my' || state.page === 'time') await refresh();
+    else updateGeoIndicators();
+  } catch (error) {
+    geo.last_error = error.message;
+    if (error.status === 400) toast(error.message, 'error');
+    updateGeoIndicators();
+  } finally {
+    geo.sending = false;
+    const next = (geo.queue || []).shift();
+    if (next) sendGeoEvent(next.kind, next.orderId);
+  }
+}
+
+function geoPositionOnce() {
+  return new Promise((resolve, reject) => {
+    if (!('geolocation' in navigator)) {
+      reject(new Error('Dieser Browser unterstützt kein GPS.'));
+      return;
+    }
+    if (!window.isSecureContext) {
+      reject(new Error('GPS benötigt HTTPS oder localhost.'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => resolve({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: Math.round(position.coords.accuracy || 0),
+      }),
+      (error) => reject(new Error(error.code === 1
+        ? 'Standortfreigabe wurde verweigert. Bitte im Browser erlauben.'
+        : error.code === 3
+          ? 'GPS-Signal zu schwach. Bitte draußen erneut versuchen.'
+          : 'Standort konnte nicht ermittelt werden.')),
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 },
+    );
+  });
+}
+
+function geoCard() {
+  const geo = state.geo || {};
+  const enabled = Boolean(geo.enabled);
+  const home = geo.home;
+  const targets = geo.targets || [];
+  const events = geo.events || [];
+  const supported = geo.supported !== false && 'geolocation' in navigator;
+  const secure = geo.secure !== false && window.isSecureContext;
+  const disabled = !supported || !secure;
+  return `
+    <div class="card geo-card" data-geo-card>
+      <div class="card-head">
+        <div>
+          <h2>${icon('pin')} GPS-Zeiterfassung</h2>
+          <div class="sub">Automatisch starten und stoppen an Baustelle und Zuhause</div>
+        </div>
+        <label class="switch" title="GPS-Zeiterfassung ein- oder ausschalten">
+          <input type="checkbox" data-action="toggle-geo" aria-label="GPS-Zeiterfassung ein- oder ausschalten" ${enabled ? 'checked' : ''} ${disabled ? 'disabled' : ''} />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+      <div class="card-body">
+        <div class="geo-status-line">
+          <span class="geo-dot ${enabled ? (geo.last_error ? 'error' : 'on') : ''}" data-geo-dot></span>
+          <span class="small" data-geo-status-text>${esc(geoStatusText())}</span>
+          <span class="spacer"></span>
+          <button class="btn sm ghost" type="button" data-action="geo-settings">${icon('edit')} Radius</button>
+        </div>
+        ${geo.absence_today ? `<div class="geo-note">${icon('calendar')} Genehmigte Abwesenheit (${esc(geo.absence_today.type_label || geo.absence_today.type)}): Die automatische Zeiterfassung ist pausiert.</div>` : ''}
+        ${!supported ? `<div class="geo-note">${icon('alert')} Dieser Browser unterstützt keine Standortbestimmung.</div>` : ''}
+        ${supported && !secure ? `<div class="geo-note">${icon('alert')} GPS funktioniert nur über HTTPS oder auf <b>localhost</b>. Im WLAN per <code>http://192.168.x.x</code> blockieren die meisten Handys den Standortzugriff.</div>` : ''}
+        <div class="geo-grid">
+          <div class="geo-place">
+            <div class="geo-place-head">${icon('home')} Zuhause</div>
+            <div class="small">${home ? esc(home.address || 'Standort gespeichert') : 'Noch kein Standort gespeichert.'}</div>
+            <button class="btn sm" type="button" data-action="set-home-location" ${disabled ? 'disabled' : ''}>
+              ${icon('pin')} ${home ? 'Neu einmessen' : 'Standort einmessen'}
+            </button>
+          </div>
+          <div class="geo-place">
+            <div class="geo-place-head">${icon('box')} Baustellen</div>
+            <div class="small">${targets.length} ${targets.length === 1 ? 'Auftrag' : 'Aufträge'} mit Standort${geo.missing_locations ? ` · ${geo.missing_locations} ohne Standort` : ''}</div>
+            <div class="small muted">Standort im Auftrag über „Standort“ aufnehmen, während du vor Ort bist.</div>
+          </div>
+        </div>
+        <div class="geo-privacy small muted">
+          ${icon('alert')} Die App prüft den Standort nur, solange sie geöffnet ist – nicht im Hintergrund oder bei gesperrtem Bildschirm.
+          Es wird kein dauerhafter Standortverlauf gespeichert, nur der automatische Start/Stopp.
+        </div>
+        ${events.length ? `
+          <details class="geo-events">
+            <summary>Letzte GPS-Ereignisse</summary>
+            <div class="geo-event-list">
+              ${events.map((event) => `
+                <div class="geo-event">
+                  <span class="muted">${fmtDateTime(event.created_at)}</span>
+                  <span>${esc(event.kind_label || event.kind)}</span>
+                  <span class="muted">${esc(event.order_number || '')}</span>
+                </div>`).join('')}
+            </div>
+          </details>` : ''}
+      </div>
+    </div>`;
+}
+
 /* ------------------------------------------------------------------ Berichte */
 async function renderReports() {
   const manager = can('reports.view.all');
@@ -2992,7 +3430,7 @@ async function renderReports() {
     </div>`;
 }
 
-async function newReportModal(orderId = null, { dictate = false } = {}) {
+async function newReportModal(orderId = null, { dictate = false, initialContent = '' } = {}) {
   if (!can('reports.own')) return toast('Keine Berechtigung zum Erstellen von Berichten.', 'error');
   if (!(state.orderOptions || []).length) {
     try {
@@ -3014,6 +3452,7 @@ async function newReportModal(orderId = null, { dictate = false } = {}) {
       { name: 'hours', label: 'Arbeitsstunden', type: 'number', step: '0.25', min: 0, default: 0 },
       {
         name: 'content', label: 'Bericht', type: 'textarea', rows: 7, full: true, required: true, dictate: true,
+        default: initialContent,
         placeholder: 'Was wurde gemacht? Material, Auffälligkeiten, Kunde eingewiesen …',
         hint: 'Tippe auf „Diktieren“ und sprich den Bericht – Text erscheint automatisch.',
       },
@@ -3512,37 +3951,139 @@ function speak(text) {
 }
 
 function listenInline(textarea, statusEl, label = 'Bericht') {
-  const recognition = startVoiceRecognition('report');
+  if (!textarea) return;
+  // Erneutes Tippen auf das Mikrofon beendet das laufende Diktat.
+  if (state.dictation && state.dictation.textarea === textarea) {
+    state.dictation.stop();
+    return;
+  }
+  if (state.dictation) state.dictation.stop();
+
+  const recognition = startVoiceRecognition('report', { continuous: true });
   if (!recognition) {
     if (statusEl) statusEl.textContent = 'Spracherkennung nicht verfügbar – bitte Text eingeben.';
     return;
   }
-  if (statusEl) statusEl.textContent = `Ich höre … ${label} sprechen.`;
-  let finalText = '';
+  // Eigene Sprachausgabe stoppen, damit sie nicht ins Diktat gerät.
+  try { window.speechSynthesis?.cancel(); } catch { /* stumm */ }
+
+  const appendSpoken = (value) => {
+    const clean = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return;
+    const current = textarea.value;
+    const separator = !current ? '' : (/\s$/.test(current) ? '' : ' ');
+    textarea.value = `${current}${separator}${clean}`;
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  const scope = textarea.closest('.modal') || document;
+  const buttons = [...scope.querySelectorAll('[data-dictate], [data-action="report-dictate"]')];
+  buttons.forEach((button) => button.classList.add('listening'));
+
+  let sessionFinal = '';
+  let committedInSession = 0;
+  let recognized = false;
+  let stopped = false;
+  let restartTimer = null;
+  let finished = false;
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    state.dictation = null;
+    buttons.forEach((button) => button.classList.remove('listening'));
+    if (statusEl) {
+      statusEl.textContent = recognized
+        ? `Diktat beendet – ${label} übernommen. Nicht vergessen zu speichern.`
+        : 'Diktat beendet. Es wurde nichts erkannt.';
+    }
+  };
+
+  const session = {
+    textarea,
+    stop() {
+      stopped = true;
+      clearTimeout(restartTimer);
+      try { recognition.stop(); } catch { /* war bereits beendet */ }
+    },
+  };
+  state.dictation = session;
+
+  if (statusEl) statusEl.textContent = `Ich höre … ${label} sprechen. Tippe erneut auf das Mikrofon, um zu beenden.`;
+  recognition.onstart = () => {
+    // Bei einem automatischen Neustart beginnt der Browser mit leeren Results.
+    sessionFinal = '';
+    committedInSession = 0;
+  };
   recognition.onresult = (event) => {
     let interim = '';
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+    let complete = '';
+    for (let i = 0; i < event.results.length; i += 1) {
       const transcript = event.results[i][0].transcript;
-      if (event.results[i].isFinal) finalText += transcript;
+      if (event.results[i].isFinal) complete += `${transcript} `;
       else interim += transcript;
     }
-    if (statusEl) statusEl.textContent = finalText || interim || 'Ich höre …';
+    sessionFinal = complete;
+    // Nur neu erkannte, endgültige Teile anhängen. Der vorhandene Bericht
+    // bleibt immer erhalten – auch wenn zwischendurch ein Gespräch läuft.
+    const pending = sessionFinal.slice(committedInSession).trim();
+    if (pending) {
+      appendSpoken(pending);
+      committedInSession = sessionFinal.length;
+      recognized = true;
+    }
+    if (statusEl) {
+      statusEl.textContent = interim
+        ? `Ich höre … ${interim}`
+        : 'Diktat läuft … tippe erneut auf das Mikrofon, um zu beenden.';
+    }
   };
-  recognition.onerror = () => {
-    if (statusEl) statusEl.textContent = 'Mikrofon nicht verfügbar. Bitte Text eingeben oder HTTPS verwenden.';
-  };
-  recognition.onend = () => {
-    const text = finalText.trim();
-    if (!text) {
-      if (statusEl) statusEl.textContent = 'Nichts erkannt – bitte erneut versuchen.';
+  recognition.onerror = (event) => {
+    if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(event.error)) {
+      stopped = true;
+      clearTimeout(restartTimer);
+      state.dictation = null;
+      buttons.forEach((button) => button.classList.remove('listening'));
+      if (statusEl) {
+        statusEl.textContent = event.error === 'not-allowed'
+          ? 'Mikrofonzugriff wurde verweigert. Bitte in den Browser-Einstellungen erlauben.'
+          : 'Mikrofon nicht verfügbar. Bitte Text eingeben oder HTTPS verwenden.';
+      }
       return;
     }
-    textarea.value = `${textarea.value ? `${textarea.value} ` : ''}${text}`;
-    textarea.dispatchEvent(new Event('change'));
-    if (statusEl) statusEl.textContent = 'Diktat übernommen – nicht vergessen zu speichern.';
-    speak('Diktat übernommen.');
+    if (statusEl && event.error !== 'no-speech' && event.error !== 'aborted') {
+      statusEl.textContent = 'Spracherkennung unterbrochen – ich höre weiter zu …';
+    }
   };
-  try { recognition.start(); } catch {
+  recognition.onend = () => {
+    if (stopped) {
+      finish();
+      return;
+    }
+    if (!textarea.isConnected) {
+      state.dictation = null;
+      buttons.forEach((button) => button.classList.remove('listening'));
+      return;
+    }
+    // Browser beenden Diktate nach Sprechpausen selbst. Automatisch weiterhören,
+    // damit ein Gespräch zwischendurch den Bericht nicht abschneidet.
+    restartTimer = setTimeout(() => {
+      if (stopped || !textarea.isConnected) return;
+      try {
+        recognition.start();
+      } catch {
+        restartTimer = setTimeout(() => {
+          if (stopped || !textarea.isConnected) return;
+          try { recognition.start(); } catch { finish(); }
+        }, 700);
+      }
+    }, 250);
+  };
+  try {
+    recognition.start();
+  } catch {
+    state.dictation = null;
+    buttons.forEach((button) => button.classList.remove('listening'));
     if (statusEl) statusEl.textContent = 'Aufnahme läuft bereits.';
   }
 }
@@ -3587,7 +4128,7 @@ function openVoiceModal(mode = 'command') {
   if (supported) listenOnce(mode);
 }
 
-function startVoiceRecognition(mode = 'command') {
+function startVoiceRecognition(mode = 'command', { continuous = false } = {}) {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
     toast('Spracherkennung wird von diesem Browser nicht unterstützt. Bitte Text eingeben.', 'error');
@@ -3596,7 +4137,7 @@ function startVoiceRecognition(mode = 'command') {
   const recognition = new Recognition();
   recognition.lang = 'de-DE';
   recognition.interimResults = true;
-  recognition.continuous = false;
+  recognition.continuous = continuous;
   recognition.maxAlternatives = 1;
   return recognition;
 }
@@ -3664,13 +4205,17 @@ async function handleVoiceText(rawText, mode = 'command') {
   const lower = text.toLowerCase();
 
   if (mode === 'report') {
-    const content = $('#report-content');
+    const content = $('#report-content') || $('#modal-form textarea[name="content"]');
     if (content) {
-      content.value = `${content.value ? `${content.value}\n` : ''}${text}`;
-      content.dispatchEvent(new Event('change'));
+      const current = content.value.replace(/\s+$/, '');
+      content.value = `${current ? `${current} ` : ''}${text}`;
+      content.dispatchEvent(new Event('change', { bubbles: true }));
+      speak('Bericht übernommen.');
+      return;
     }
     closeModal();
-    speak('Bericht übernommen.');
+    newReportModal(null, { dictate: true, initialContent: text });
+    speak('Bericht übernommen. Du kannst weiter diktieren.');
     return;
   }
 
@@ -4323,6 +4868,9 @@ function employeeForm(employee = null) {
       { name: 'name', label: 'Name', required: true },
       { name: 'role', label: 'Rolle', type: 'select', options: ['Meister', 'Geselle', 'Anlagenmechaniker SHK', 'Elektriker', 'Dachdecker', 'Techniker', 'Monteur', 'Auszubildende'], default: 'Monteur' },
       { name: 'phone', label: 'Telefon' },
+      { name: 'home_street', label: 'Hausanschrift (Straße & Nr.)', full: true },
+      { name: 'home_zip', label: 'PLZ (Zuhause)' },
+      { name: 'home_city', label: 'Ort (Zuhause)' },
       { name: 'rate', label: 'Stundensatz (€)', type: 'number', step: '0.01', min: 0, default: 0 },
       { name: 'color', label: 'Farbe im Kalender', type: 'text', default: '#0f766e', hint: 'Hex-Farbe, z. B. #2563eb' },
       { name: 'active', label: 'Status', type: 'checkbox', checkLabel: 'aktiv', default: 1 },
@@ -4684,6 +5232,100 @@ const ACTIONS = {
   },
   'filter-reports': (id, el) => { state.reportsFilter = el.dataset.filter; renderReports(); },
   'toggle-time': (id) => toggleTime(id || null),
+  'toggle-geo': async (id, element) => {
+    const enabled = Boolean(element?.checked);
+    if (enabled && !window.confirm(
+      'GPS-Zeiterfassung aktivieren?\n\n'
+      + 'Die App prüft deinen Standort, solange sie geöffnet ist, und startet/stoppt die Arbeitszeit automatisch an gespeicherten Standorten (Zuhause und Baustellen).\n\n'
+      + 'Dabei wird bei jedem automatischen Start/Stopp die Position gespeichert. Ein dauerhafter Standortverlauf wird nicht angelegt. Du kannst die Funktion jederzeit wieder ausschalten.'
+    )) {
+      if (element) element.checked = false;
+      return;
+    }
+    try {
+      const status = await api.put('/api/geo/settings', {
+        enabled,
+        radius_m: state.geo?.radius_m || 150,
+      });
+      state.geo = {
+        ...(state.geo || {}),
+        ...status,
+        loaded: true,
+        supported: 'geolocation' in navigator,
+        secure: window.isSecureContext,
+      };
+      if (status.time !== undefined) state.time = status.time;
+      if (status.enabled) startGeoTracking();
+      else stopGeoTracking();
+      toast(status.enabled ? 'GPS-Zeiterfassung aktiviert.' : 'GPS-Zeiterfassung ausgeschaltet.');
+      if (state.page === 'my' || state.page === 'time') await refresh();
+      else updateGeoIndicators();
+    } catch (error) {
+      if (element) element.checked = !enabled;
+      toast(error.message, 'error');
+    }
+  },
+  'geo-settings': () => {
+    formModal({
+      title: 'GPS-Zeiterfassung einstellen',
+      subtitle: 'Radius um Zuhause und Baustelle.',
+      fields: [
+        {
+          name: 'radius_m', label: 'Radius in Metern', type: 'number', min: 75, max: 500, step: 25,
+          default: state.geo?.radius_m || 150,
+          hint: '75–500 m. Größer ist toleranter, kleiner genauer.',
+        },
+      ],
+      submitLabel: 'Speichern',
+      onSubmit: async (values) => {
+        const status = await api.put('/api/geo/settings', {
+          enabled: Boolean(state.geo?.enabled),
+          radius_m: Number(values.radius_m),
+        });
+        state.geo = { ...(state.geo || {}), ...status, loaded: true };
+        if (status.time !== undefined) state.time = status.time;
+        closeModal();
+        toast('Radius gespeichert.');
+        if (state.page === 'my' || state.page === 'time') await refresh();
+      },
+    });
+  },
+  'set-home-location': async () => {
+    try {
+      toast('Standort wird ermittelt …', 'info');
+      const position = await geoPositionOnce();
+      const status = await api.put('/api/geo/home', position);
+      state.geo = {
+        ...(state.geo || {}),
+        ...status,
+        loaded: true,
+        supported: 'geolocation' in navigator,
+        secure: window.isSecureContext,
+      };
+      if (status.time !== undefined) state.time = status.time;
+      toast(`Zuhause-Standort gespeichert (±${position.accuracy} m).`);
+      if (state.page === 'my' || state.page === 'time') await refresh();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+  'order-location': async (id, element) => {
+    const orderId = id || Number(element?.dataset.id);
+    if (!orderId) return;
+    try {
+      toast('Standort wird ermittelt …', 'info');
+      const position = await geoPositionOnce();
+      await api.put(`/api/orders/${orderId}/location`, position);
+      toast(`Standort gespeichert (±${position.accuracy} m). Die GPS-Zeiterfassung erkennt den Auftrag jetzt.`);
+      state.geo = null;
+      await ensureGeoState(true);
+      const modalOpen = Boolean($('#modal-root .modal'));
+      if (modalOpen && state.currentOrderId === orderId) await openOrder(orderId);
+      else if (!modalOpen && (state.page === 'my' || state.page === 'orders')) await refresh();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
   'new-time': () => timeForm(),
   'delete-time': async (id) => {
     if (!confirm('Zeiteintrag wirklich löschen?')) return;
@@ -5148,6 +5790,8 @@ const ACTIONS = {
 
   logout: async () => {
     try { await api.post('/api/auth/logout'); } catch { /* stumm */ }
+    stopGeoTracking();
+    state.geo = null;
     state.user = null;
     state.time = null;
     showLogin();
@@ -6528,6 +7172,8 @@ function buildBottomNav() {
 
 function showLogin() {
   applyBranding();
+  stopGeoTracking();
+  state.geo = null;
   const shell = $('#app-shell');
   const login = $('#login-screen');
   if (shell) shell.hidden = true;
@@ -6607,6 +7253,7 @@ async function enterApp(data) {
       .map((order) => ({ value: order.id, label: `${order.number} · ${order.title}` }));
   }).catch(() => {});
   await refreshSelfTime();
+  if (can('time.own')) await ensureGeoState(true);
   updateBadges();
 }
 

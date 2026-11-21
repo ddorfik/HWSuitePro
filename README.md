@@ -69,6 +69,7 @@ API-Aufruf** geprüft. Das Frontend blendet zusätzlich nicht erlaubte Bereiche 
 | Berichte | alle | alle + Freigabe | alle | **nur eigene** | alle (lesen) |
 | Fotos | alle | alle | alle | eigene Aufträge | – |
 | Zeiten | alle | alle | alle | **nur eigene** | alle |
+| GPS-Zeiterfassung | ✓ | ✓ | ✓ | **nur eigene** | ✓ (eigene) |
 | Urlaub & Arbeitszeit | ✓ | ✓ | Anträge lesen | **eigener Antrag** | ✓ |
 | Mitarbeiter | ✓ | ✓ | lesen | lesen | ✓ |
 | Textassistent | ✓ | ✓ | ✓ | – | ✓ |
@@ -97,6 +98,9 @@ PWA-installierbar). Monteure landen direkt auf **„Mein Tag"**:
 - **Berichtsfreigabe**: Vorgesetzte/Chef geben Berichte frei und übernehmen das Material per Klick in
   den Auftrag (inkl. Lagerbuchung)
 - **Zeiterfassung**: eigene Zeiten ansehen, nachtragen und korrigieren
+- **Automatische Zeiterfassung per GPS**: optional selbst ein-/ausschaltbar – Zeit startet beim
+  Verlassen von Zuhause bzw. bei Ankunft an der Baustelle und stoppt beim Verlassen der Baustelle
+  bzw. bei Ankunft zu Hause (Details unten)
 
 ### Bericht zu einem Auftrag erstellen
 
@@ -108,9 +112,39 @@ Es gibt vier Wege – alle führen zum selben Berichtseditor:
 4. **Sprache**: „Bericht" oder „Bericht für Müller" – wird der Auftrag gefunden, öffnet sich das
    Formular und das Mikrofon startet direkt für das Diktat.
 
-Im Formular kannst du den Text tippen oder auf **„Diktieren"** tippen und sprechen. Material wird beim
-Speichern automatisch aus dem Text erkannt; anschließend lassen sich im Bericht beliebig viele Fotos
-ergänzen.
+Im Formular kannst du den Text tippen oder auf **„Diktieren"** tippen und sprechen. Das Diktat bleibt
+aktiv und hängt jeden Satz an den Bericht an – auch nach Sprechpausen oder einem Gespräch mit dem
+Kunden. Ein erneuter Tipp auf das Mikrofon beendet die Aufnahme; der vorhandene Text wird nie
+überschrieben. Material wird beim Speichern automatisch aus dem Text erkannt; anschließend lassen
+sich im Bericht beliebig viele Fotos ergänzen.
+
+### Automatische Zeiterfassung per GPS (optional)
+
+Jeder Techniker kann die Funktion selbst unter **„Mein Tag" → GPS-Zeiterfassung** ein- und
+ausschalten. Einrichtung:
+
+1. **Zuhause einmessen**: zu Hause auf „Standort einmessen" tippen.
+2. **Baustelle einmessen**: im Auftrag (oder auf der Auftragskarte) auf **„Standort"** tippen,
+   solange man vor Ort ist. Die Adresse bleibt wie gewohnt hinterlegt; für die Geofence wird
+   einmalig die GPS-Position gespeichert.
+3. **Radius** einstellen (Standard 150 m, 75–500 m).
+
+Danach gilt:
+
+- Verlassen des Zuhause-Radius → Arbeitszeit startet (ohne Auftrag).
+- Ankunft im Baustellen-Radius → die Zeit wechselt automatisch auf diesen Auftrag.
+- Verlassen des Baustellen-Radius → die Auftragszeit stoppt.
+- Ankunft im Zuhause-Radius → die Arbeitszeit stoppt.
+- Bei einer **genehmigten Abwesenheit** (Urlaub/Krankheit) pausiert die Automatik automatisch.
+- Manuelles Ein-/Ausstempeln bleibt jederzeit möglich und wird nicht überschrieben; die Automatik
+  reagiert nur auf das Betreten/Verlassen der gespeicherten Standorte.
+
+**Wichtig:** Die Standortprüfung läuft nur, solange die App geöffnet ist (Vordergrund). Bei
+gesperrtem Bildschirm oder geschlossener App findet keine automatische Erkennung statt – dafür wäre
+eine native App nötig. GPS benötigt **HTTPS oder localhost**. Bei jedem automatischen Start/Stopp
+wird die Position im Ereignisprotokoll gespeichert; einen dauerhaften Standortverlauf gibt es nicht.
+Ereignisse werden nach 180 Tagen automatisch gelöscht. Hausanschrift und Zuhause-Koordinaten sind
+nur für HR/Chef/Vorgesetzte und den Mitarbeiter selbst sichtbar.
 
 ---
 
@@ -278,6 +312,8 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 ### Einsatzplanung / Kalender
 
 - Wochen- **und Monatsansicht**, farblich je Monteur, mit Filter-Chips nach Terminart
+- **Urlaub und Abwesenheiten** sind in allen drei Ansichten sichtbar – genehmigt und beantragt
+  (beantragt gestrichelt/orange), abgelehnt wird ausgeblendet
 - **Plantafel** als dritte Ansicht: Mitarbeiter, Abwesenheiten und Ressourcen (Fahrzeuge,
   Werkzeuge, Maschinen) auf einen Blick – mit Kapazitätsprüfung und Konflikterkennung
 - **Terminarten**: Baustelle, Kundenbesuch, Meeting, Personal/HR, Notdienst, Fortbildung,
@@ -480,6 +516,7 @@ GasWasserPro/
 │   ├── calc.js             Kalkulation und Nachkalkulation
 │   ├── resources.js        Plantafel und Ressourcenbuchungen
 │   ├── hr.js               Urlaub, Abwesenheiten und Arbeitszeitkonten
+│   ├── geo.js              GPS-Zeiterfassung, Geofencing und Standortprüfung
 │   ├── finance.js          Bankimport, DATEV und SEPA
 │   ├── site.js             Aufmaß, Checklisten, Bautagebuch, Unterschrift
 │   ├── inventory.js        Inventur und Artikel-Scan
@@ -528,6 +565,13 @@ GET    /api/time/running              Laufende Zeiterfassung
 POST   /api/time/start                Einstempeln
 POST   /api/time/stop                 Ausstempeln
 POST   /api/time                      Zeit nachtragen
+
+GET    /api/geo/status                GPS-Status, Zuhause- und Baustellen-Standorte
+PUT    /api/geo/settings              GPS-Zeiterfassung ein-/ausschalten und Radius setzen
+PUT    /api/geo/home                  Zuhause-Standort per GPS speichern
+PUT    /api/orders/:id/location       Baustellen-Standort per GPS speichern
+POST   /api/geo/event                 Übergang melden (startet/stoppt die Zeit serverseitig)
+GET    /api/geo/events                Letzte GPS-Ereignisse des eigenen Kontos
 
 GET    /api/reports                   Berichte (Filter: status, order_id, employee_id)
 POST   /api/reports                   Bericht anlegen (optional Material automatisch erkennen)

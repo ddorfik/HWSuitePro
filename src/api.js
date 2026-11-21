@@ -65,6 +65,9 @@ import {
   saveInventoryCount, closeInventorySession, deleteInventorySession,
 } from './inventory.js';
 import { draftText } from './assistant.js';
+import {
+  GEO_KINDS, geoStatus, updateGeoSettings, setHomeLocation, setOrderLocation, geoEvent, geoEvents,
+} from './geo.js';
 
 class HttpError extends Error {
   constructor(status, message, code = null) {
@@ -85,6 +88,11 @@ const num = (value, fallback = 0) => {
 };
 const str = (value) => (value == null ? '' : String(value).trim());
 const bool = (value) => (value === true || value === 1 || value === '1' || value === 'true' ? 1 : 0);
+const coordinate = (value) => {
+  if (value === '' || value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.round(parsed * 1e7) / 1e7 : null;
+};
 const bodyBoolean = (value) => value === true || value === 1 || value === '1' || value === 'true' || value === 'on';
 const search = (value) => `%${str(value)}%`;
 
@@ -432,27 +440,35 @@ function sanitizeEmployee(row) {
   if (!row) return row;
   const copy = { ...row };
   delete copy.rate;
+  // Hausanschrift und GPS-Koordinaten gehören nicht in Auftragsdetails.
+  delete copy.home_street;
+  delete copy.home_zip;
+  delete copy.home_city;
+  delete copy.home_lat;
+  delete copy.home_lng;
+  delete copy.home_geo_at;
   return copy;
 }
 
 /** Entfernt Preise und Finanzdaten für Rollen ohne Rechnungsrecht. */
 function sanitizeOrderData(data, user) {
-  if (!data || can(user, 'invoices.view')) return data;
+  if (!data) return data;
+  const showMoney = can(user, 'invoices.view');
   const { order, items, employee, invoice, totals, ...rest } = data;
   const cleanOrder = { ...order };
-  delete cleanOrder.labor_rate;
-  delete cleanOrder.tax_rate;
-  const cleanItems = (items ?? []).map((item) => {
-    const copy = { ...item };
-    delete copy.unit_price;
-    return copy;
-  });
+  const cleanItems = (items ?? []).map((item) => ({ ...item }));
+  if (!showMoney) {
+    delete cleanOrder.labor_rate;
+    delete cleanOrder.tax_rate;
+    cleanItems.forEach((item) => { delete item.unit_price; });
+  }
   return {
     ...rest,
+    ...(showMoney ? { totals } : {}),
     order: cleanOrder,
     items: cleanItems,
     employee: sanitizeEmployee(employee),
-    invoice: null,
+    invoice: showMoney ? invoice : null,
   };
 }
 
@@ -1174,6 +1190,8 @@ route('POST', '/api/properties', (req) => {
     water_connection: bool(body.water_connection ?? 1),
     heating_type: str(body.heating_type),
     meter_number: str(body.meter_number),
+    latitude: coordinate(body.latitude),
+    longitude: coordinate(body.longitude),
     notes: str(body.notes),
   });
   return db.prepare('SELECT * FROM properties WHERE id = ?').get(id);
@@ -1182,10 +1200,12 @@ route('POST', '/api/properties', (req) => {
 route('PUT', '/api/properties/:id', (req, res, params) => {
   const data = pick(req.body ?? {}, [
     'customer_id', 'label', 'street', 'zip', 'city', 'type', 'gas_connection',
-    'water_connection', 'heating_type', 'meter_number', 'notes',
+    'water_connection', 'heating_type', 'meter_number', 'notes', 'latitude', 'longitude',
   ]);
   if ('gas_connection' in data) data.gas_connection = bool(data.gas_connection);
   if ('water_connection' in data) data.water_connection = bool(data.water_connection);
+  if ('latitude' in data) data.latitude = coordinate(data.latitude);
+  if ('longitude' in data) data.longitude = coordinate(data.longitude);
   updateRow('properties', params.id, data);
   return db.prepare('SELECT * FROM properties WHERE id = ?').get(params.id);
 }, { permission: 'customers.manage' });
@@ -1198,11 +1218,19 @@ route('DELETE', '/api/properties/:id', (req, res, params) => {
 // ----------------------------------------------------------------- Monteure
 route('GET', '/api/employees', (req) => {
   const showRates = can(req.user, 'employees.rates');
+  const showHome = can(req.user, 'employees.manage') || can(req.user, 'hr.manage');
   return db.prepare('SELECT * FROM employees ORDER BY active DESC, name').all()
     .map((row) => {
-      if (showRates) return row;
       const copy = { ...row };
-      delete copy.rate;
+      if (!showRates) delete copy.rate;
+      if (!showHome && row.id !== req.user.employee_id) {
+        delete copy.home_street;
+        delete copy.home_zip;
+        delete copy.home_city;
+        delete copy.home_lat;
+        delete copy.home_lng;
+        delete copy.home_geo_at;
+      }
       return copy;
     });
 }, { permission: 'employees.view' });
@@ -1221,12 +1249,15 @@ route('POST', '/api/employees', (req) => {
     vacation_days: body.vacation_days !== undefined ? num(body.vacation_days, 30) : num(getSettings().hr_vacation_days, 30),
     entry_date: str(body.entry_date) || null,
     exit_date: str(body.exit_date) || null,
+    home_street: str(body.home_street),
+    home_zip: str(body.home_zip),
+    home_city: str(body.home_city),
   });
   return db.prepare('SELECT * FROM employees WHERE id = ?').get(id);
 }, { permission: 'employees.manage' });
 
 route('PUT', '/api/employees/:id', (req, res, params) => {
-  const data = pick(req.body ?? {}, ['name', 'role', 'phone', 'rate', 'color', 'active', 'weekly_hours', 'vacation_days', 'entry_date', 'exit_date']);
+  const data = pick(req.body ?? {}, ['name', 'role', 'phone', 'rate', 'color', 'active', 'weekly_hours', 'vacation_days', 'entry_date', 'exit_date', 'home_street', 'home_zip', 'home_city']);
   if ('active' in data) data.active = bool(data.active);
   if ('entry_date' in data && !data.entry_date) data.entry_date = null;
   if ('exit_date' in data && !data.exit_date) data.exit_date = null;
@@ -2306,6 +2337,44 @@ route('DELETE', '/api/time/:id', (req, res, params) => {
   db.prepare('DELETE FROM time_entries WHERE id = ?').run(params.id);
   return { ok: true };
 }, { permissions: ['time.own', 'time.manage'] });
+
+// ----------------------------------------------------------------- GPS-Zeiterfassung
+route('GET', '/api/geo/status', (req) => asApi(() => ({
+  ...geoStatus(req.user),
+  kinds: GEO_KINDS,
+  time: decorateTime(runningTime(req.user)),
+})), { permission: 'time.own' });
+
+route('PUT', '/api/geo/settings', (req) => asApi(() => {
+  const status = updateGeoSettings(req.user, req.body ?? {});
+  logActivity('zeit', `GPS-Zeiterfassung ${status.enabled ? 'aktiviert' : 'deaktiviert'}.`);
+  return { ...status, time: decorateTime(runningTime(req.user)) };
+}), { permission: 'time.own' });
+
+route('PUT', '/api/geo/home', (req) => asApi(() => {
+  const status = setHomeLocation(req.user, req.body ?? {});
+  logActivity('zeit', 'Zuhause-Standort für die GPS-Zeiterfassung gespeichert.');
+  return { ...status, time: decorateTime(runningTime(req.user)) };
+}), { permission: 'time.own' });
+
+route('PUT', '/api/orders/:id/location', (req, res, params) => asApi(() => {
+  const order = assertOrderAccess(req.user, params.id);
+  const location = setOrderLocation(req.user, order.id, req.body ?? {});
+  logActivity('auftrag', `Standort für ${order.number} gespeichert (GPS).`);
+  return location;
+}), { permissions: ['orders.progress', 'orders.manage'] });
+
+route('POST', '/api/geo/event', (req) => asApi(() => {
+  const body = req.body ?? {};
+  if (body.order_id) assertOrderAccess(req.user, body.order_id);
+  const result = geoEvent(req.user, body);
+  if (result.started || result.stopped) logActivity('zeit', result.message);
+  return { ...result, time: result.time ? decorateTime(result.time) : null };
+}), { permission: 'time.own' });
+
+route('GET', '/api/geo/events', (req, res, params, url) => asApi(() =>
+  geoEvents(req.user, url.searchParams.get('limit'))
+), { permission: 'time.own' });
 
 // ----------------------------------------------------------------- Berichte
 route('GET', '/api/reports', (req, res, params, url) => {

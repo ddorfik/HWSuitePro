@@ -267,6 +267,24 @@ CREATE TABLE IF NOT EXISTS time_entries (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- GPS-Zeiterfassung: nur die Übergänge (Betreten/Verlassen) werden protokolliert,
+-- kein dauerhafter Standortverlauf.
+CREATE TABLE IF NOT EXISTS geo_time_events (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  employee_id   INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+  kind          TEXT NOT NULL,
+  order_id      INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+  latitude      REAL NOT NULL,
+  longitude     REAL NOT NULL,
+  accuracy      REAL,
+  distance_m    REAL,
+  radius_m      REAL,
+  time_entry_id INTEGER REFERENCES time_entries(id) ON DELETE SET NULL,
+  message       TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS reports (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -566,6 +584,8 @@ CREATE INDEX IF NOT EXISTS idx_properties_customer ON properties(customer_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_time_employee ON time_entries(employee_id);
 CREATE INDEX IF NOT EXISTS idx_time_order ON time_entries(order_id);
+CREATE INDEX IF NOT EXISTS idx_geo_events_user ON geo_time_events(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_geo_events_order ON geo_time_events(order_id);
 CREATE INDEX IF NOT EXISTS idx_reports_order ON reports(order_id);
 CREATE INDEX IF NOT EXISTS idx_reports_employee ON reports(employee_id);
 CREATE INDEX IF NOT EXISTS idx_photos_order ON photos(order_id);
@@ -631,6 +651,22 @@ ensureColumn('employees', 'vacation_days', 'REAL');
 ensureColumn('employees', 'entry_date', 'TEXT');
 ensureColumn('employees', 'exit_date', 'TEXT');
 ensureColumn('time_adjustments', 'created_by', 'INTEGER');
+// GPS-Zeiterfassung: Einwilligung/Einstellung je Benutzer, Standorte je Mitarbeiter/Objekt.
+ensureColumn('users', 'geo_time_enabled', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('users', 'geo_radius_m', 'INTEGER NOT NULL DEFAULT 150');
+ensureColumn('users', 'geo_consent_at', 'TEXT');
+ensureColumn('employees', 'home_street', 'TEXT');
+ensureColumn('employees', 'home_zip', 'TEXT');
+ensureColumn('employees', 'home_city', 'TEXT');
+ensureColumn('employees', 'home_lat', 'REAL');
+ensureColumn('employees', 'home_lng', 'REAL');
+ensureColumn('employees', 'home_geo_at', 'TEXT');
+ensureColumn('properties', 'latitude', 'REAL');
+ensureColumn('properties', 'longitude', 'REAL');
+ensureColumn('properties', 'geo_at', 'TEXT');
+ensureColumn('time_entries', 'source', "TEXT NOT NULL DEFAULT 'manuell'");
+// Standort-Ereignisse werden nur für die Nachvollziehbarkeit der Zeiten benötigt.
+db.exec("DELETE FROM geo_time_events WHERE created_at < datetime('now', '-180 days');");
 // Lager
 ensureColumn('articles', 'barcode', 'TEXT');
 ensureColumn('articles', 'location', 'TEXT');
