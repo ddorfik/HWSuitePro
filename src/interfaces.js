@@ -411,7 +411,7 @@ export function openapiDocument(baseUrl = '') {
     openapi: '3.0.3',
     info: {
       title: 'HandwerkPro API',
-      version: '1.7.0',
+      version: '1.8.0',
       description: 'Interne REST-API. Anmeldung per Session-Cookie (hp_session). Alle Rechte werden serverseitig geprüft.',
     },
     servers: [{ url: baseUrl || '/' }],

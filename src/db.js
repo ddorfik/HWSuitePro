@@ -817,6 +817,8 @@ export const DEFAULT_SETTINGS = {
   company_mobile: '0172 555 12 30',
   company_email: 'info@moeller-gaswasser.de',
   company_web: 'www.moeller-gaswasser.de',
+  company_logo: '',
+  company_logo_updated: '',
   smtp_host: '',
   smtp_port: '587',
   smtp_secure: '0',

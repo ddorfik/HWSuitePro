@@ -1224,3 +1224,41 @@ body.logged-out { background: radial-gradient(1200px 600px at 10% 0%, #14434f 0%
   width: 100%; max-height: 46vh; background: #000; border-radius: 12px;
   object-fit: cover; display: block;
 }
+
+/* Firmenlogo */
+.brand-mark.has-logo {
+  background: #fff;
+  padding: 5px;
+  box-shadow: 0 6px 14px rgba(15, 28, 33, 0.18);
+}
+.brand-mark.has-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  border-radius: 6px;
+}
+.logo-preview {
+  display: grid;
+  place-items: center;
+  min-height: 96px;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background:
+    linear-gradient(45deg, #f3f5f6 25%, transparent 25%, transparent 75%, #f3f5f6 75%),
+    linear-gradient(45deg, #f3f5f6 25%, #fff 25%, #fff 75%, #f3f5f6 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.logo-preview img {
+  max-width: 100%;
+  max-height: 150px;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 6px;
+}
+@media (max-width: 760px) {
+  .brand-mark.has-logo { padding: 4px; }
+  .logo-preview img { max-height: 110px; }
+}

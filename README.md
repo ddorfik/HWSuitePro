@@ -421,6 +421,11 @@ Die Automatik läuft beim Serverstart und danach **alle 5 Minuten** im Hintergru
 ### Einstellungen
 
 - **Marke & Gewerk**: App-Name, Branche und Untertitel frei konfigurierbar
+- **Firmenlogo** (JPG/PNG/WebP, max. 4 MB): erscheint in App, Login, öffentlichen Kundenlinks
+  (Termin, Anfrage, Portal) sowie auf Angeboten, Rechnungen, Auftragsbestätigungen und
+  Lieferscheinen. PNG/WebP werden im Browser automatisch als JPEG gespeichert; das Logo liegt
+  unter `data/branding/logo.jpg` und ist öffentlich über `/branding/logo` abrufbar.
+  Nur Rollen mit `settings.manage` dürfen es ändern.
 - Firmendaten, Steuernummer, USt-IdNr., Handelsregister, Bankverbindung
 - Nummernkreise, Zahlungsziel, Stundensatz, Rechnungstexte
 - Automatik einzeln schaltbar, Mahnfrist und Mahngebühr
@@ -447,6 +452,8 @@ Die PDFs werden mit einem eigenen, dependency-freien PDF-Generator erzeugt (A4, 
 WinAnsi-Kodierung für Umlaute und €). Sie enthalten:
 
 - Absenderblock und Empfängeradresse
+- Optionales **Firmenlogo** oben links (JPEG, ohne externe Bibliothek als PDF-Bild eingebettet);
+  das Layout rückt automatisch nach, ohne Logo bleibt es unverändert
 - Rechnungsnummer, Rechnungs- und Leistungsdatum, Kundennummer, Auftragsnummer, Fälligkeit
 - Positionstabelle mit Menge, Einheit, Einzelpreis und Gesamtpreis
 - Zwischensumme, Umsatzsteuer, Gesamtbetrag
@@ -580,7 +587,8 @@ GasWasserPro/
 │   ├── interfaces.js       GAEB X83/X84, OCI, Lexware, Webhooks, OpenAPI
 │   ├── assistant.js        Lokaler Textassistent
 │   ├── documents.js        Layout von Rechnung, Abschlag, Auftrag, Bestätigung, Lieferschein
-│   └── pdf.js              PDF-Generator inkl. eingebetteter Dateien (ZUGFeRD)
+│   ├── branding.js         Firmenlogo speichern, prüfen und öffentlich ausliefern
+│   └── pdf.js              PDF-Generator inkl. JPEG-Bildern und eingebetteter Dateien (ZUGFeRD)
 ├── public/
 │   ├── index.html          App-Gerüst, Login, Navigation
 │   ├── app.js              SPA-Logik, Techniker-App, Sprache, Berichte
@@ -593,6 +601,7 @@ GasWasserPro/
 │   ├── termin.html         Öffentliche Terminbestätigung für Kunden (/termin/<token>)
 │   ├── anfrage.html        Öffentliches Anfrageformular (/anfrage/<token>)
 │   ├── portal.html         Kundenportal (/portal/<token>)
+│   ├── branding.js/.css    Firmenlogo in den öffentlichen Kundenansichten
 │   └── sw.js               Service Worker
 ├── test/smoke.test.js      Tests
 ├── scripts/reset.js        Demo-Daten zurücksetzen
@@ -612,6 +621,10 @@ POST   /api/auth/logout               Abmelden
 GET    /api/auth/me                   Aktueller Benutzer, Rechte, laufende Zeit
 GET    /api/auth/meta                 App-Name, Gewerk, Rollen, Demo-Hinweise (öffentlich)
 POST   /api/auth/password             Passwort ändern
+
+POST   /api/settings/logo             Firmenlogo hochladen (nur settings.manage)
+DELETE /api/settings/logo             Firmenlogo entfernen (nur settings.manage)
+GET    /branding/logo                 Logo öffentlich für App, Kundenlinks und Dokumente
 
 GET    /api/dashboard                 Kennzahlen – rollenabhängig (Chef/Techniker/HR)
 GET    /api/orders                    Aufträge (Filter: status, type, q; Monteur: nur eigene)

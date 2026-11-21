@@ -23,6 +23,7 @@ import {
   runningTime, startTime, stopTime,
 } from './work.js';
 import { sendMail, mailConfigured } from './mail.js';
+import { saveLogo, removeLogo } from './branding.js';
 import {
   materialSources, MATERIAL_SECRET_SETTINGS, importCatalog, testSource, lookupMaterial,
   enrichArticle, catalogImportHistory, dealerDeepLink, gtinInfo,
@@ -963,6 +964,8 @@ route('GET', '/api/auth/meta', (req) => {
     trade: getSettings().trade,
     trade_tagline: getSettings().trade_tagline,
     company_name: getSettings().company_name,
+    company_logo: getSettings().company_logo,
+    company_logo_updated: getSettings().company_logo_updated,
     secure: isSecureRequest(req),
     roles: Object.entries(ROLES).map(([key, role]) => ({
       key, label: role.label, short: role.short, description: role.description, color: role.color,
@@ -1008,6 +1011,19 @@ route('PUT', '/api/settings', (req) => {
   }
   return { settings: settingsForUser(setSettings(patch), req.user) };
 }, { permission: 'settings.manage' });
+
+route('POST', '/api/settings/logo', (req) => asApi(() => {
+  const upload = decodeUpload(req.body ?? {});
+  const result = saveLogo(upload.buffer);
+  logActivity('einstellung', 'Firmenlogo aktualisiert.');
+  return { ok: true, ...result };
+}), { permission: 'settings.manage' });
+
+route('DELETE', '/api/settings/logo', () => asApi(() => {
+  const result = removeLogo();
+  logActivity('einstellung', 'Firmenlogo entfernt.');
+  return result;
+}), { permission: 'settings.manage' });
 
 route('POST', '/api/mail/test', async (req) => {
   const to = str(req.body?.to) || str(getSettings().company_email);
